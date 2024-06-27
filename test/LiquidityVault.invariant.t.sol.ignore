@@ -1,0 +1,383 @@
+// SPDX-License-Identifier: Unlicense
+pragma solidity ^0.8.17;
+
+
+import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
+import {TestERC20} from "./tokens/TestERC20.sol";
+import {TestTaxedERC20} from "./tokens/TestTaxedERC20.sol";
+import "src/LiquidityVault.sol";
+import {UniswapLiquidity, ISwapRouter02, IV3SwapRouter} from "shared/src/libraries/UniswapLiquidity.sol";
+import {IMintableERC20} from "./interfaces/IMintableERC20.sol";
+import {IUniswapV2Pair} from "v2-core/interfaces/IUniswapV2Pair.sol";
+import {IUniswapV3Pool} from "v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {Math} from "openzeppelin/utils/math/Math.sol";
+
+import {Test, TestBase, StdCheats, StdUtils, console, Vm, StdInvariant} from "forge-std/Test.sol";
+
+library StringHelper {
+    function add(string memory s1, string memory s2) internal pure returns (string memory) {
+        return string.concat(s1, s2);
+    }
+}
+
+library FFILog {
+    function ffiLog(Vm vm, string memory s) internal {
+        string[] memory cmds = new string[](4);
+        cmds[0] = "python3";
+        cmds[1] = "test/log.py";
+        cmds[2] = "--append";
+        cmds[3] = s;
+        vm.ffi(cmds);
+    }
+
+    function newLog(Vm vm) internal {
+        string[] memory cmds = new string[](3);
+        cmds[0] = "python3";
+        cmds[1] = "test/log.py";
+        cmds[2] = "--new";
+        vm.ffi(cmds);
+    }
+}
+
+struct Pool {
+    UniswapLiquidity.Version version;
+    address addr;
+}
+
+library PoolSet {
+    function add(Pool[] storage self, Pool memory value) internal {
+        self.push(value);
+    }
+    
+    function remove(Pool[] storage self, address value) internal {
+        for(uint i = 0; i < self.length; i++) {
+            if(self[i].addr == value) {
+                self[i] = self[self.length - 1];
+                self.pop();
+                break;
+            }
+        }
+    }
+    
+    function contains(Pool[] storage self, address value) internal view returns (bool) {
+        for(uint i = 0; i < self.length; i++) {
+            if(self[i].addr == value) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+library AddressSet {
+    function contains(address[] storage self, address value) internal view returns (bool) {
+        for(uint i = 0; i < self.length; i++) {
+            if(self[i] == value) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+library Array {
+    function find(uint256[] storage arr, uint256 val) internal view returns (uint256) {
+        for (uint i = 0; i < arr.length; i++) {
+            if (arr[i] == val) return i;
+        }
+        return type(uint256).max;
+    }
+
+    function sortedAdd(uint256[] storage arr, uint256 val, function (uint256, uint256) internal returns (bool) cmp) internal returns (uint256) {
+        uint256 i = 0;
+        while (i < arr.length && cmp(arr[i], val)) i++;
+        arr.push(val);
+        for (uint j = arr.length - 1; j > i; j--) arr[j] = arr[j - 1];
+        arr[i] = val;
+        return i;
+    }
+
+    function removeAt(uint256[] storage arr, uint256 idx) internal returns (uint256) {
+        uint256 val = arr[idx];
+        for (uint i = idx; i < arr.length - 1; i++) arr[i] = arr[i + 1];
+        arr.pop();
+        return val;
+    }
+
+}
+
+
+
+contract TimePersitanceTestBase is TestBase, StdUtils {
+    uint constant AVG_SEC_PER_BLOCK = 15;
+    uint timestamp = 1;
+
+    modifier advanceTime(uint delta, uint probability, uint seed) {
+        if (delta < AVG_SEC_PER_BLOCK) delta = AVG_SEC_PER_BLOCK;
+        if (seed < type(uint).max / 100 * _bound(seed, 0, 100)) timestamp += delta;
+        vm.warp(timestamp);
+        vm.roll(timestamp / AVG_SEC_PER_BLOCK);
+        _;
+    }
+}
+
+contract LiquidityVaultHandler is TimePersitanceTestBase, StdCheats, StdInvariant {
+    using StringHelper for string;
+    using FFILog for Vm;
+    using PoolSet for Pool[];
+    using AddressSet for address[];
+
+    struct TokenHolder {
+        address token;
+        address holder;
+    }
+
+    struct VaultHolder {
+        address owner;
+        uint maturity;
+        bool redeemed;    
+    }
+
+    VaultHolder[] vaultHolders;
+    // We need a vault list that is sorted by expiry
+
+    TokenHolder[] tokenHolders;
+    address[] taxedTokens;
+    address[] nonTaxedTokens;
+    address[] allTokens;
+    
+    Pool[] pools;
+    LiquidityVault lVault;
+    
+    constructor() {
+        lVault = new LiquidityVault();
+    }
+
+    modifier useActor() {
+        vm.ffiLog("[modifier] useActor");
+
+        startHoax(msg.sender);
+        _;
+        vm.stopPrank();
+    }
+
+    // we need to test transfering of the tokens as well
+
+    function mint(uint tokenASeed, uint tokenBSeed, uint feeSeed, uint versionSeed, uint32 lockTime) external useActor {
+        console.log("mint");
+
+        address tokenA;
+        address tokenB; // Should by default be the 0
+        if (allTokens.length > 0) {
+            if (tokenASeed < type(uint).max / 100 * 33) tokenA = allTokens[_bound(tokenASeed, 0, allTokens.length - 1)];
+            else tokenA = tokenASeed >= type(uint).max / 100 * 66 ? address(new TestTaxedERC20()) : address(new TestERC20());
+
+            if (tokenBSeed < type(uint).max / 100 * 50) tokenB = allTokens[_bound(tokenBSeed, 0, allTokens.length - 1)];
+        }
+        else tokenA = tokenASeed < type(uint).max / 100 * 50 ? address(new TestERC20()) : address(new TestTaxedERC20());
+
+        IMintableERC20 primaryToken = IMintableERC20(tokenA);
+        IMintableERC20 pairedToken = IMintableERC20(tokenB);
+
+        uint tokenASupply = primaryToken.totalSupply();
+        uint tokenBSupply;
+        if (tokenB == address(0)) tokenBSupply = _bound(tokenBSeed, 10 ** 17, 5 * 10 ** 18);
+        else {
+            uint s = pairedToken.totalSupply();
+            tokenBSupply = _bound(tokenBSeed, 10 ** pairedToken.decimals(), s / 100 * 25);
+            pairedToken.mint(tokenBSupply);
+        }
+
+  
+        if (allTokens.contains(tokenA)) {
+            // Need to mint more supply to be able to add to the lp
+            tokenASupply = _bound(tokenASeed, 10 ** primaryToken.decimals(), primaryToken.totalSupply() / 100 * 25);
+            primaryToken.mint(tokenASupply);
+        }
+        else {
+            // console.log("excluding the contract: %s", tokenA);
+            // excludeContract(tokenA);
+            allTokens.push(tokenA);
+        }
+
+        primaryToken.approve(address(lVault), tokenASupply);
+        if (tokenB != address(0)) pairedToken.approve(address(lVault), tokenBSupply);
+
+        // Determine the pool address
+        console.log("tokenA: %s", tokenA);
+        console.log("tokenB: %s", tokenB);
+        if (tokenA == tokenB) return;//vm.expectRevert();
+        address pool;
+        address WETH = UniswapLiquidity.SWAP_ROUTER.WETH9();
+        if (versionSeed < type(uint).max / 100 * 50) {
+            // v2
+            lVault.mint{ value: tokenB == address(0) ? tokenBSupply : 0 }(ILiquidityVault.MintConfig({
+                version: UniswapLiquidity.Version.V2,
+                tokenA: tokenA,
+                tokenB: tokenB,
+                permitA: Permit({ enable: false, deadline: 0, r: 0, s: 0, v: 0 }),
+                permitB: Permit({ enable: false, deadline: 0, r: 0, s: 0, v: 0 }),
+                amountA: tokenASupply,
+                amountB: tokenBSupply,
+                requiredA: 0,
+                requiredB: 0,
+                fee: 0,
+                tickLower: 0,
+                tickUpper: 0,
+                lockDuration: lockTime
+            }));
+
+            pool = UniswapLiquidity.V2_FACTORY.getPair(tokenA, tokenB == address(0) ? WETH : tokenB);
+            if (!pools.contains(pool)) pools.push(Pool(UniswapLiquidity.Version.V2, pool));
+        }
+        else {
+            uint24 fee = uint24(UniswapLiquidity.FEE_TIERS()[_bound(feeSeed, 0, 2)]);
+            (int24 tickLower, int24 tickUpper) = UniswapLiquidity.maxTickBoundary(fee);
+            // v3
+            lVault.mint{ value: tokenB == address(0) ? tokenBSupply : 0 }(ILiquidityVault.MintConfig({
+                version: UniswapLiquidity.Version.V3,
+                tokenA: tokenA,
+                tokenB: tokenB,
+                permitA: Permit({ enable: false, deadline: 0, r: 0, s: 0, v: 0 }),
+                permitB: Permit({ enable: false, deadline: 0, r: 0, s: 0, v: 0 }),
+                amountA: tokenASupply,
+                amountB: tokenBSupply,
+                requiredA: 0,
+                requiredB: 0,
+                fee: fee,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                lockDuration: lockTime
+            }));
+
+            pool = UniswapLiquidity.getV3PoolAddress(tokenA, tokenB == address(0) ? WETH : tokenB, fee);
+            console.log("fee : %d", fee);
+
+            if (!pools.contains(pool)) pools.push(Pool(UniswapLiquidity.Version.V3, pool));
+        }
+
+        console.log("pool: %s", pool);
+
+        vaultHolders.push(VaultHolder({
+            owner: msg.sender,
+            maturity: block.timestamp + lockTime,
+            redeemed: false 
+        }));
+        
+    }
+
+    function redeem() external {
+        
+    }
+
+
+    function swap(uint seed, uint amountSeed, uint timeSeed) external advanceTime(1 days, 100, timeSeed) {
+        vm.deal(address(this), 1 << 128);
+        console.log("swap");
+        // for all active lp vaults trade some randomly
+        /*
+            owners here dont matter so we just want to keep track of the holders for the eligible sellers
+            
+            a change that for a seller if one exists
+            a chance that a buy occurs 
+        */
+
+        address WETH = UniswapLiquidity.SWAP_ROUTER.WETH9();
+        IWETH9 WETH9 = IWETH9(WETH);
+        for (uint i; i < pools.length; i++) {
+            address token0;
+            address token1;
+            uint24 fee;
+            if (pools[i].version == UniswapLiquidity.Version.V2) {
+                console.log("pool addr: %s", pools[i].addr);
+                IUniswapV2Pair pair = IUniswapV2Pair(pools[i].addr);
+                token0 = pair.token0();
+                token1 = pair.token1();
+            }
+            else if (pools[i].version == UniswapLiquidity.Version.V3) {
+                IUniswapV3Pool pool = IUniswapV3Pool(pools[i].addr);
+                token0 = pool.token0();
+                token1 = pool.token1();
+                fee = pool.fee();
+            }
+
+            address[] memory path = new address[](2);
+            path[0] = seed < type(uint).max / 100 * 50 ? token0 : token1;
+            path[1] = seed < type(uint).max / 100 * 50 ? token1 : token0;
+
+            uint amountIn;
+            if (path[0] == WETH) {
+                amountIn = _bound(amountSeed, 10 ** 18, 2 * 10 ** 18);
+                WETH9.deposit{ value: amountIn }();
+                WETH9.approve(address(UniswapLiquidity.SWAP_ROUTER), amountIn);
+            }
+            else {
+                IMintableERC20 inToken = IMintableERC20(path[0]);
+                amountIn = inToken.balanceOf(address(this));
+                if (amountIn == 0) {
+                    amountIn = _bound(amountSeed, 10 ** inToken.decimals(), inToken.totalSupply() / 100);
+                    inToken.mint(amountIn);
+                    inToken.approve(address(UniswapLiquidity.SWAP_ROUTER), amountIn);
+                }
+            }
+            if (pools[i].version == UniswapLiquidity.Version.V2) {
+                UniswapLiquidity.SWAP_ROUTER.swapExactTokensForTokens(
+                    amountIn, 
+                    0, 
+                    path, 
+                    address(this)
+                );
+            }
+            else if (pools[i].version == UniswapLiquidity.Version.V3) {
+                UniswapLiquidity.SWAP_ROUTER.exactInputSingle(IV3SwapRouter.ExactInputSingleParams({
+                    tokenIn: path[0],
+                    tokenOut: path[1],
+                    fee: fee,
+                    recipient: address(this),
+                    amountIn: amountIn,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0 
+                }));
+            }
+        }
+    }
+
+}
+
+contract TestContract is Test {
+    using StringHelper for string;
+    using FFILog for Vm;
+
+    LiquidityVaultHandler liquidityVaultHandler;
+
+    // constructor() {
+    //     vm.newLog();
+    // }
+
+    function setUp() public {
+        console.log("setup");
+        // vm.ffiLog("Test::setUp()");
+        liquidityVaultHandler = new LiquidityVaultHandler();
+        targetContract(address(liquidityVaultHandler));
+
+        bytes4[] memory selectors = new bytes4[](2);
+        selectors[0] = bytes4(keccak256("mint(uint256,uint256,uint256,uint256,uint32)"));
+        selectors[1] = bytes4(keccak256("swap(uint256,uint256,uint256)"));
+        targetSelector(FuzzSelector({
+            addr: address(liquidityVaultHandler),
+            selectors: selectors
+        }));
+        // excludeSender(address(liquidityVaultHandler));
+    }
+
+    /// forge-config: default.invariant.runs = 3
+    /// forge-config: default.invariant.depth = 10
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: default.invariant.call-override = false
+    function invariant_A() external {
+ 
+    }
+
+
+
+}

@@ -1,0 +1,13 @@
+[profile.default]
+via_ir = true
+optimizer = true
+optimizer_runs = 2000
+fs_permissions = [{ access = "write", path = "./"}]
+
+
+[profile.ci.fuzz]
+runs = 10_000
+
+
+[invariant]
+fail_on_revert = true
