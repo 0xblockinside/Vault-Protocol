@@ -54,12 +54,14 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     );
     event Redeemed(uint256 indexed id);
     event Extended(uint256 indexed id, uint32 additionalTime);
+    event Migrated(uint256 indexed id, address newToken);
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CONSTANTS                            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    IUniswapV2Factory public constant V2_FACTORY = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
-    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    bytes32 public constant INIT_CODE_HASH = 0x4156ccc01dad273e6c65c4335c428a2ff4a4b0c95a9a228f6bfed45a069d3fe7;
+    IUniswapV2Factory public constant V2_FACTORY = IUniswapV2Factory(0x7E0987E5b3a30e3f2828572Bb659A548460a3003);
+    address public constant WETH = 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9;
     address public constant ETH = address(0);
     uint32 public constant LOCK_FOREVER = type(uint32).max;
     uint40 public constant LOCKED_FOREVER = type(uint40).max;
@@ -213,7 +215,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             hex'ff',
             address(V2_FACTORY),
             keccak256(abi.encodePacked(token0, token1)),
-            hex'96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f' // init code hash
+            INIT_CODE_HASH
         )))));
     }
 
@@ -529,6 +531,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         hashInfoForCertificateID[id] = 0;
         _burn(address(0), id, owner, true);
+        emit Redeemed(id);
     }
 
     /**
@@ -543,6 +546,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         else unlockTime += additionalTime;
 
         _setExtraData(id, uint96(unlockTime));
+        emit Extended(id, additionalTime);
     }
 
     /**
@@ -663,7 +667,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         (uint256 amount0, uint256 amount1) = _removeLiquidity(
             pool,
             snapshot.liquidity,
-            address(this) 
+            address(this)
         );
 
 
@@ -682,5 +686,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         hashInfoForCertificateID[id] = 0;
         _burn(address(0), id, owner, true);
+        emit Migrated(id, token);
     }
 }
