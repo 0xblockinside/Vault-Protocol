@@ -104,7 +104,6 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     string constant NO_FEES_ERROR = 'UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED';
-    IUniswapV2Router02 constant  = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
     ISwapRouter02 public constant SWAP_ROUTER = ISwapRouter02(0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45/*0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E*/);
     IUniswapV2Factory public constant V2_FACTORY = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f/*0x7E0987E5b3a30e3f2828572Bb659A548460a3003 */);
 
