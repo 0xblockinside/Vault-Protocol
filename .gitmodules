@@ -13,3 +13,6 @@
 [submodule "lib/shared"]
 	path = lib/shared
 	url = https://github.com/0xblockinside/shared
+[submodule "lib/v2-core"]
+	path = lib/v2-core
+	url = https://github.com/Uniswap/v2-core
