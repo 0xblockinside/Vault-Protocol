@@ -96,10 +96,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     uint256 private _idTracker;
 
     /// Bits Layout of '_feeSlot':
-    /// - [0..239]    240 bits   `mintFee`
-    /// - [240..256]   16 bits   `referralMintFeePercent`
+    /// - [0..159]    160 bits   `mintFee`
+    /// - [160..175]   16 bits   `refMintFeeBIPS`
+    /// - [176..191]   16 bits   `refMintDiscountBIPS`
+    /// - [192..207]   16 bits   `refCollectFeeBIPS`
+    /// - [208..223]   16 bits   `mintDiscountBIPS`
+    /// - [224..239]   16 bits   `minProtocolCollectFeeBIPS`
     uint256 _feeSlot = 0.1 ether << 16 | 2_000;
-    uint256 _collectFeePercent = 3_333; // 33.33%
 
     ISuccessor _successor;
 
@@ -118,7 +121,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// Bits Layout of 'extraData':
-    /// - [0..39]    40 bits   `lockExpiry`
+    /// - [0..39]    40 bits   `unlockTime`
+    /// - [40..55]   16 bits   `feeLeverBIPS`
+    /// - [56..58]   16 bits   `collectFeeLeverOption`
 
     constructor(IPayMaster pm) {
         payMaster = pm;
@@ -128,14 +133,33 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  PRIVATE FUNCTIONS                         */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    
-    function _decodeFeeSlot(uint256 slot) internal pure returns (uint256 mintFee, uint256 referralMintFeePercent) {
-        referralMintFeePercent = slot & ((1 << 16) - 1); // Extract the first 16 bits
-        mintFee = slot >> 16; // Extract the last 240 bits
+    function _decodeExtraData(uint96 slot) internal pure returns (uint40 unlockTime, uint16 feeLeverBIPS, CollectFeeOption collectFeeOption) {
+        unlockTime = uint40(slot);
+        feeLeverBIPS = uint16(slot >> 40);
+        collectFeeOption = CollectFeeOption(uint8(slot >> 56));
     }
 
-    function _encodeFeeSlot(uint256 mintFee, uint256 referralMintFeePercent) internal pure returns (uint256 slot) {
-        slot = (referralMintFeePercent & ((1 << 16) - 1)) | (mintFee << 16);
+    function _encodeExtraData(uint40 unlockTime, uint16 feeLeverBIPS, CollectFeeOption collectFeeOption) internal pure returns (uint96 extraData) {
+        extraData = uint96(unlockTime) | (uint96(feeLeverBIPS) << 40) | (uint96(uint8(collectFeeOption)) << 56);
+    }
+
+    function _decodeFeeSlot(uint256 slot) internal pure returns (uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) {
+        uint256 bit16Mask = ((1 << 16) - 1);
+        mintFee = uint160(slot);
+        refMintFeeBIPS = (slot >> 160) & bit16Mask;
+        refMintDiscountBIPS = (slot >> 176) & bit16Mask;
+        refCollectFeeBIPS = (slot >> 192) & bit16Mask;
+        mintDiscountBIPS = (slot >> 208) & bit16Mask;
+        minProtocolCollectFeeBIPS = (slot >> 224) & bit16Mask;
+    }
+
+    function _encodeFeeSlot(uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) internal pure returns (uint256 slot) {
+        slot = uint256(uint160(mintFee)) |
+               (refMintFeeBIPS << 160) |
+               (refMintDiscountBIPS << 176) |
+               (refCollectFeeBIPS << 192) |
+               (mintDiscountBIPS << 208) |
+               (minProtocolCollectFeeBIPS << 224);
     }
 
     function _encodeHashInfo(uint160 snapshotHash, uint96 referralHash) internal pure returns (bytes32) {
@@ -159,34 +183,15 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         )));
     }
 
-    function _convertToWETH(uint256 b, uint256 wethNeeded) internal returns (uint256 refundETH) {
-        uint wethB = IERC20(WETH).balanceOf(address(this));
-
-        uint ethToConvert = wethNeeded > wethB ? wethNeeded - wethB : 0;
-        if (wethB > wethNeeded) {
-            IWETH9(WETH).withdraw(wethB - wethNeeded);
-            refundETH += wethB - wethNeeded;
-        }
-        if (ethToConvert > 0) {
-            if (b < ethToConvert) revert InsufficientFunds();
-            IWETH9(WETH).deposit{value: ethToConvert}();
-        }
-        refundETH += b - ethToConvert;
-    }
-
-
     function _resolveAndPermitIfNecessary(address token, Permit memory permit, uint256 amount) internal returns (address) {
         if (permit.enable && token != WETH) IPermitERC20(token).permit(msg.sender, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         return token;
     }
 
-    function _getAndValidateCertificateInfo(uint256 id) internal view returns (uint40 unlockTime, address owner) {
-        uint96 data;
-        (owner, data) = _getOwnershipSlot(id);
+    function _getAndValidateCertificateInfo(uint256 id) internal view returns (uint96 extraData, address owner) {
+        (owner, extraData) = _getOwnershipSlot(id);
         if (!_isApprovedOrOwner(msg.sender, id, owner)) revert NotOwnerNorApproved();
         if (owner == address(0)) revert TokenDoesNotExist(); 
-
-        unlockTime = uint40(data);
     }
 
     function _getWETHNeeded(address tokenA, address tokenB, uint256 amountA, uint256 amountB) internal pure returns (uint256) {
@@ -195,12 +200,16 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         return 0;
     }
 
-    function _validateFunds(uint256 mintFee, uint256 wethNeeded) internal returns (uint256 remainingBal) {
+    function _validateFunds(uint256 fee, uint256 wethNeeded) internal returns (uint256 remainingBal) {
         remainingBal = msg.value;
-        if (msg.value < mintFee) revert InsufficientFunds();
-        remainingBal -= mintFee;
+        if (msg.value < fee) revert InsufficientFunds();
+        remainingBal -= fee;
 
-        if (wethNeeded > 0) remainingBal = _convertToWETH(remainingBal, wethNeeded);
+        if (wethNeeded > 0) {
+            if (remainingBal < wethNeeded) revert InsufficientFunds();
+            IWETH9(WETH).deposit{value: wethNeeded}();
+            remainingBal -= wethNeeded;
+        }
     }
 
 
@@ -264,6 +273,51 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         actualAmount1 = liquidity * (reserve1 + actualAmount1) / totalLiquidity;
     }
 
+    function _swapFeesIfNeccessary(address pool, address token0, address token1, bool oneForZero, uint256 cutToSwap, uint256 ownerFeeToSwap) internal returns (uint256 swappedCut, uint256 swappedOwnerFee) {
+        uint256 swapIn = cutToSwap + ownerFeeToSwap;
+        if (swapIn == 0) return (0, 0);
+
+        (address tokenIn, address tokenOut) = oneForZero ? (token1, token0) : (token0, token1);
+        (uint256 r0, uint256 r1, ) = IUniswapV2Pair(pool).getReserves();
+        (uint256 rIn, uint256 rOut) = oneForZero ? (r1, r0) : (r0, r1);
+
+        /// @dev we do early transfer then immediately query the balance due to potential tax tokens
+        SafeTransferLib.safeTransfer(tokenIn, pool, swapIn);
+        uint256 amountIn = IERC20(tokenIn).balanceOf(pool) - rIn;
+
+
+        // Inlined from UniswapV2Library
+        uint amountInWithFee = amountIn * 997;
+        uint numerator = amountInWithFee * rOut;
+        uint denominator = rIn * 1000 + amountInWithFee;
+        uint amountOut = numerator / denominator;
+
+        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
+        uint256 tokenOutPreBalance = tokenOut != WETH ? IERC20(tokenOut).balanceOf(address(this)) : 0;
+
+        IUniswapV2Pair(pool).swap(oneForZero ? amountOut : 0, oneForZero ? 0 : amountOut, address(this), new bytes(0));
+
+        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
+        if (tokenOut != WETH) amountOut = IERC20(tokenOut).balanceOf(address(this)) - tokenOutPreBalance;
+
+        swappedCut = amountOut * cutToSwap / swapIn;
+        swappedOwnerFee = amountOut - swappedCut;
+    }
+
+    function _payFeeCut(uint256 cut, address token, uint256 protocolBIPS, uint256 refBIPS, bool toReferrer) internal {
+        if (cut == 0) return;
+
+        uint refCut = cut * refBIPS / (protocolBIPS + refBIPS);
+        if (token == WETH) payMaster.payFees{ value: cut }(toReferrer ? cut - refCut : cut);
+        else {
+            if (!toReferrer) SafeTransferLib.safeTransfer(token, payMaster.OWNER(), cut);
+            else {
+                if (refCut > 0) SafeTransferLib.safeTransfer(token, address(payMaster), refCut);
+                if (cut - refCut> 0) SafeTransferLib.safeTransfer(token, address(payMaster), cut - refCut);
+            }
+        }
+    }
+
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  EXTERNAL FUNCTIONS                         */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -277,22 +331,39 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
     //////////            GETTERS           //////////////
-    function fees() external view returns (uint256 mintFee, uint256 referalMintFeePercent, uint256 collectFeePercent) { 
-        (mintFee, referalMintFeePercent) = _decodeFeeSlot(_feeSlot);
-        collectFeePercent = _collectFeePercent;
+    function fees() external view returns (uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) { 
+        (mintFee, refMintFeeBIPS, refMintDiscountBIPS, refCollectFeeBIPS, mintDiscountBIPS, minProtocolCollectFeeBIPS) = _decodeFeeSlot(_feeSlot);
     }
+
+    function mintFee(bool isReferred, uint16 feeLevelBIPS) public returns (uint256 mintFee, uint256 refFeeCut) {
+        (uint256 maxMintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, , uint256 mintDiscountBIPS, ) = _decodeFeeSlot(_feeSlot);
+        if (isReferred) {
+            mintFee = maxMintFee * refMintDiscountBIPS / FEE_DIVISOR;
+            refFeeCut = maxMintFee * refMintFeeBIPS / FEE_DIVISOR;
+        }
+        else {
+            uint256 discount = maxMintFee * mintDiscountBIPS / FEE_DIVISOR;
+            mintFee = maxMintFee - discount * uint256(feeLevelBIPS) / FEE_DIVISOR;
+        }
+
+    }
+
 
     function unlockTime(uint256 id) view external returns (uint256) {
         return uint256(uint40(_getExtraData(id)));
     }
 
     //////////            SETTERS             //////////////
-    function setFees(uint256 mintFee, uint256 referralMintFeePercent, uint256 collectFeePercent) external onlyOwner {
-        if (collectFeePercent > _collectFeePercent) revert InvalidFee();
-        if (referralMintFeePercent > FEE_DIVISOR) revert InvalidFee();
+    function setFees(uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) external onlyOwner {
+        (, , , , , uint256 _minProtocolCollectFeesBIPS) = _decodeFeeSlot(_feeSlot);
+        if (minProtocolCollectFeeBIPS > _minProtocolCollectFeesBIPS) revert InvalidFee();
+        if (refCollectFeeBIPS + minProtocolCollectFeeBIPS > FEE_DIVISOR) revert InvalidFee();
+        if (refMintFeeBIPS > FEE_DIVISOR) revert InvalidFee();
+        if (refMintDiscountBIPS > FEE_DIVISOR) revert InvalidFee();
+        if (refCollectFeeBIPS > FEE_DIVISOR) revert InvalidFee();
+        if (mintDiscountBIPS > FEE_DIVISOR) revert InvalidFee();
 
-        _feeSlot = _encodeFeeSlot(mintFee, referralMintFeePercent);
-        _collectFeePercent = collectFeePercent;
+        _feeSlot = _encodeFeeSlot(mintFee, refMintFeeBIPS, refMintDiscountBIPS, refCollectFeeBIPS, mintDiscountBIPS, minProtocolCollectFeeBIPS);
     }
 
     function setSuccessor(address successor) external onlyOwner {
@@ -301,6 +372,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
     function setReferrer(address referrer, bool value) external onlyOwner {
         registeredReferrers[referrer] = value;
+    }
+
+    function setCollectFeeOptions(uint256 id, CollectFeeOption feeOption) external {
+        (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
+        (uint40 unlockTime, uint16 feeLeverBIPS, ) = _decodeExtraData(extraData);
+
+        _setOwnershipSlot(id, owner, _encodeExtraData(unlockTime, feeLeverBIPS, feeOption));
     }
 
 
@@ -335,19 +413,24 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      *        - uint256 amountA: The amount of tokenA to add to the pool.
      *        - uint256 amountB: The amount of tokenB to add to the pool.
      *        - uint32 lockDuration: The duration for which the liquidity should be locked.
+     *        - uint16 feeDiscountLeverBIPS: The amount of discount the user choses for their mint fee (BIPS)
+     *        - CollectFeeOption collectFeeOption: The amount of discount the user choses for their mint fee (BIPS)
      * @return id The ID of the minted liquidity position.
      * @return snapshot A data structure representing the snapshot of the users liquidity position 
     **/
     function mint(address recipient, address referrer, MintParams calldata params) public payable returns (uint256 id, Snapshot memory snapshot) {
-        if (referrer != address(0) && !registeredReferrers[referrer]) revert NotRegisteredRefferer();
+        bool isReferred = referrer != address(0);
+        if (isReferred && !registeredReferrers[referrer]) revert NotRegisteredRefferer();
 
-        (uint256 mintFee, uint256 referralMintFeePercent) = _decodeFeeSlot(_feeSlot);
+        (uint256 mintFee, uint256 refMintFeeCut) = mintFee(isReferred, params.feeDiscountLeverBIPS);
+        uint256 protocolMintFeeCut = mintFee - refMintFeeCut;
+        uint96 referrerHash = isReferred ? uint96(uint256(keccak256(abi.encodePacked(referrer, refMintFeeCut)))) : 0;
+
         uint256 remainingBalance = _validateFunds(mintFee, _getWETHNeeded(params.tokenA, params.tokenB, params.amountA, params.amountB));
         uint40 unlockTime = params.lockDuration == LOCK_FOREVER || (block.timestamp + params.lockDuration) > type(uint40).max ? LOCKED_FOREVER : uint40(block.timestamp + uint256(params.lockDuration));
 
         // Pay Fee
-        uint256 devMintFee = referrer == address(0) ? mintFee : mintFee - mintFee * referralMintFeePercent / FEE_DIVISOR;
-        payMaster.payFees{ value: mintFee }(devMintFee);
+        payMaster.payFees{ value: mintFee }(protocolMintFeeCut);
 
         // Token Validation & Address Resolvement
         if (params.tokenA == params.tokenB) revert IdenticalTokens();
@@ -361,13 +444,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         (snapshot.token0, snapshot.token1) = _orderTokens(tokenA, tokenB);
         (uint256 desiredAmount0, uint256 desiredAmount1) = snapshot.token0 == tokenA ? (params.amountA, params.amountB) : 
-                                                                              (params.amountB, params.amountA);
-
+                                                                                       (params.amountB, params.amountA);
         address pool = V2_FACTORY.getPair(tokenA, tokenB);
         pool = pool == address(0) ? V2_FACTORY.createPair(tokenA, tokenB) : pool;
 
+        /// @dev had to be sourced from params since tokenA/B && snapshot.token# are resolved
         (bool isNativeETH0, bool isNativeETH1) = snapshot.token0 == tokenA ? (params.tokenA == ETH, params.tokenB == ETH) : 
-                                                                    (params.tokenB == ETH, params.tokenA == ETH);
+                                                                             (params.tokenB == ETH, params.tokenA == ETH);
         uint256 refundETH;
         (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, refundETH) = _addLiquidityV2(
             pool, 
@@ -381,9 +464,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         // Refund
         if (remainingBalance + refundETH > 0) payable(msg.sender).transfer(remainingBalance + refundETH);
-
-        uint256 referralFee = mintFee * referralMintFeePercent / FEE_DIVISOR;
-        uint96 referrerHash = referrer != address(0) ? uint96(uint256(keccak256(abi.encodePacked(referrer, referralFee)))) : 0;
 
         hashInfoForCertificateID[_idTracker] = _encodeHashInfo(
             _encodeSnapshotID(snapshot),
@@ -401,10 +481,10 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             snapshot.liquidity, 
             snapshot.amountIn0,
             snapshot.amountIn1,
-            referrer != address(0) ? abi.encode(uint256(referralFee)) : bytes("")
+            isReferred ? abi.encode(uint256(refMintFeeCut)) : bytes("")
         );
 
-        _setOwnershipSlot(_idTracker, recipient, uint96(unlockTime));
+        _setOwnershipSlot(_idTracker, recipient, _encodeExtraData(unlockTime, params.feeDiscountLeverBIPS, params.collectFeeOption));
         _incrementBalance(recipient, 1);
         _idTracker++;
     }
@@ -428,7 +508,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     **/
     function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 fee0, uint256 fee1) {
         (, uint96 referralHash) = verifySnapshot(id, snapshot);
-        (address owner, ) = _getOwnershipSlot(id);
+        (address owner, uint96 extraData) = _getOwnershipSlot(id);
+        (, uint256 feeDiscountLeverBIPS, CollectFeeOption feeOptions) = _decodeExtraData(extraData);
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
         uint256 balance0 = IERC20(snapshot.token0).balanceOf(pool);
@@ -438,53 +519,81 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 wouldBeRemoved0 = snapshot.liquidity * balance0 / totalLiquidity;
         uint256 wouldBeRemoved1 = snapshot.liquidity * balance1 / totalLiquidity;
 
+        /// @dev link to calculation TODO
         uint256 feeLiquidity0 = totalLiquidity * wouldBeRemoved0 / balance0 - Math.mulDiv(totalLiquidity, Math.sqrt(Math.mulDiv(wouldBeRemoved0, snapshot.amountIn0 * snapshot.amountIn1, wouldBeRemoved1)), balance0);
         uint256 feeLiquidity1 = totalLiquidity * wouldBeRemoved1 / balance1 - Math.mulDiv(totalLiquidity, Math.sqrt(Math.mulDiv(wouldBeRemoved1, snapshot.amountIn0 * snapshot.amountIn1, wouldBeRemoved0)), balance1);
 
+        /// @dev take the max of the liquidities
         uint256 feeLiquidity = feeLiquidity0 <= feeLiquidity1 ? feeLiquidity1 : feeLiquidity0;
 
         if (feeLiquidity == 0) revert InsufficientLiquidityBurned();
         (fee0, fee1) = _removeLiquidity(pool, feeLiquidity, address(this));
 
-        (uint256 referralFee0, uint256 referralFee1) = (fee0 * _collectFeePercent / FEE_DIVISOR, fee1 * _collectFeePercent / FEE_DIVISOR);
+        uint256 liquidity = snapshot.liquidity - feeLiquidity;
+        /// @dev Inlined amountsFromLiquidityV2
+        totalLiquidity = IUniswapV2Pair(pool).totalSupply();
+        uint256 amountIn0 = liquidity * (balance0 - fee0) / totalLiquidity;
+        uint256 amountIn1 = liquidity * (balance1 - fee1) / totalLiquidity;
 
-        // Prep WETH -> ETH
-        if (snapshot.token0 == WETH) IWETH9(WETH).withdraw(fee0);
-        if (snapshot.token1 == WETH) IWETH9(WETH).withdraw(fee1);
+        /// @section Fee Breakdown
+        ( , , , uint256 refCollectFeeBIPS, , uint256 minProtocolCollectFeeBIPS) = _decodeFeeSlot(_feeSlot);
+        (uint256 cut0, uint256 cut1) = (0, 0);
 
-        // Payout the referrer or dev
-        if (referralFee0 > 0) {
-            if (snapshot.token0 == WETH) {
-                payMaster.payFees{ value: referralFee0 }(referralHash == 0 ? referralFee0 : 0);
-            }
-            else SafeTransferLib.safeTransfer(snapshot.token0, referralHash == 0 ? payMaster.OWNER() : address(payMaster), referralFee0);
+        if (referralHash != 0) (cut0, cut1) = (
+            fee0 * (refCollectFeeBIPS + minProtocolCollectFeeBIPS) / FEE_DIVISOR, 
+            fee1 * (refCollectFeeBIPS + minProtocolCollectFeeBIPS) / FEE_DIVISOR);
+        else {
+            // if feeDiscountLeverBIPS max it was max discount, therefore smallest amount of fee and ther fore greatst amount to protcol
+            uint256 lowFeeCut0 = fee0 * minProtocolCollectFeeBIPS / FEE_DIVISOR;
+            uint256 lowFeeCut1 = fee1 * minProtocolCollectFeeBIPS / FEE_DIVISOR;
+
+            /// @dev highest userFeeDiscountBIPS == 10_000 (100%) => gives protocol (fee0, fee1)
+            ///      lowest  userFeeDiscountBIPS ==      0   (0%) => gives protocol (lowFeeCut0, lowFeeCut1)
+            (cut0, cut1) = (
+                lowFeeCut0 + (fee0 - lowFeeCut0) * feeDiscountLeverBIPS / FEE_DIVISOR,
+                lowFeeCut1 + (fee1 - lowFeeCut1) * feeDiscountLeverBIPS / FEE_DIVISOR
+            );
         }
-        if (referralFee1 > 0) {
-            if (snapshot.token1 == WETH) {
-                payMaster.payFees{ value: referralFee1 }(referralHash == 0 ? referralFee1 : 0);
-            }
-            else SafeTransferLib.safeTransfer(snapshot.token1, referralHash == 0 ? payMaster.OWNER() : address(payMaster), referralFee1);
-        }
 
-        // Payout the liquidity owner
-        if (snapshot.token0 == WETH) payable(owner).transfer(fee0 - referralFee0);
-        else SafeTransferLib.safeTransfer(snapshot.token0, owner, fee0 - referralFee0);
-        if (snapshot.token1 == WETH) payable(owner).transfer(fee1 - referralFee1);
-        else SafeTransferLib.safeTransfer(snapshot.token1, owner, fee1 - referralFee1);
+        (uint256 ownerFee0, uint256 ownerFee1) = (fee0 - cut0, fee1 - cut1);
+
+        /// @dev all cut fees will be given in ETH and need to be swapped
+        uint256 swapCut0For1 = snapshot.token1 == WETH ? cut0 : 0;
+        uint256 swapCut1For0 = snapshot.token0 == WETH ? cut1 : 0;
+
+        uint256 ownerSwap0For1 = feeOptions == CollectFeeOption.TOKEN_1 ? ownerFee0 : 0;
+        uint256 ownerSwap1For0 = feeOptions == CollectFeeOption.TOKEN_0 ? ownerFee1 : 0;
+
+        /// @dev all fee cuts will be taken in SUPPORTED BASE TOKENS whenever possible
+        (uint256 swapedCut0, uint256 swapedOwnerFees0) = _swapFeesIfNeccessary(pool, snapshot.token0, snapshot.token1, true, swapCut1For0, ownerSwap1For0);
+        (uint256 swapedCut1, uint256 swapedOwnerFees1) = _swapFeesIfNeccessary(pool, snapshot.token1, snapshot.token1, false, swapCut0For1, ownerSwap0For1);
+        ownerFee0 = ownerFee0 + swapedOwnerFees0 - ownerSwap0For1;
+        ownerFee1 = ownerFee1 + swapedOwnerFees1 - ownerSwap1For0;
+        cut0 = cut0 + swapedCut0 - swapCut0For1;
+        cut1 = cut1 + swapedCut1 - swapCut1For0;
+
+        // Prep: WETH -> ETH
+        if (snapshot.token0 == WETH) IWETH9(WETH).withdraw(ownerFee0 + cut0);
+        if (snapshot.token1 == WETH) IWETH9(WETH).withdraw(ownerFee1 + cut1);
+
+        // Payout: referrer or protocol
+        _payFeeCut(cut0, snapshot.token0, minProtocolCollectFeeBIPS, refCollectFeeBIPS, referralHash != 0);
+        _payFeeCut(cut1, snapshot.token1, minProtocolCollectFeeBIPS, refCollectFeeBIPS, referralHash != 0);
+
+        // Payout: owner
+        if (snapshot.token0 == WETH) payable(owner).transfer(ownerFee0);
+        else SafeTransferLib.safeTransfer(snapshot.token0, owner, ownerFee0);
+        if (snapshot.token1 == WETH) payable(owner).transfer(ownerFee1);
+        else SafeTransferLib.safeTransfer(snapshot.token1, owner, ownerFee1);
 
         // Update the Payout Merkle root
         if (referralHash != 0) {
             referralHash = uint96(uint256(keccak256(abi.encodePacked(
-                uint96(uint256(keccak256(abi.encodePacked(referralHash, referralFee0)))),
-                referralFee1
+                uint96(uint256(keccak256(abi.encodePacked(referralHash, cut0)))),
+                cut1 
             ))));
         }
 
-        uint256 liquidity = snapshot.liquidity - feeLiquidity;
-        // Inlined amountsFromLiquidityV2 since not used else where
-        totalLiquidity = IUniswapV2Pair(pool).totalSupply();
-        uint256 amountIn0 = liquidity * IERC20(snapshot.token0).balanceOf(pool) / totalLiquidity;
-        uint256 amountIn1 = liquidity * IERC20(snapshot.token1).balanceOf(pool) / totalLiquidity;
 
         hashInfoForCertificateID[id] = _encodeHashInfo(
             _encodeSnapshotID(Snapshot({
@@ -497,6 +606,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             referralHash
         );
 
+        uint256 refCut0 = referralHash != 0 ? cut0 * refCollectFeeBIPS / (refCollectFeeBIPS + minProtocolCollectFeeBIPS) : 0;
+        uint256 refCut1 = referralHash != 0 ? cut1 * refCollectFeeBIPS / (refCollectFeeBIPS + minProtocolCollectFeeBIPS) : 0;
         emit Collected(
             id, 
             fee0,
@@ -504,8 +615,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             liquidity,
             amountIn0,
             amountIn1,
-            referralHash != 0 ? abi.encode(uint256(referralFee0)) : bytes(""),
-            referralHash != 0 ? abi.encode(uint256(referralFee1)) : bytes("")
+            referralHash != 0 ? abi.encode(refCut0) : bytes(""),
+            referralHash != 0 ? abi.encode(refCut1) : bytes("")
         );
     }
 
@@ -522,7 +633,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     **/
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external {
         verifySnapshot(id, snapshot);
-        (uint40 unlockTime, address owner) = _getAndValidateCertificateInfo(id);
+        (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
+        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
         if (unlockTime == LOCKED_FOREVER || block.timestamp <= unlockTime) revert NotUnlocked();
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
@@ -540,7 +652,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      * @param additionalTime The additional time to extend the lock duration. If set to LOCK_FOREVER, the position will be locked forever.
      */
     function extend(uint256 id, uint32 additionalTime) external {
-        (uint40 unlockTime, ) = _getAndValidateCertificateInfo(id);
+        (uint96 extraData, ) = _getAndValidateCertificateInfo(id);
+        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
         if (unlockTime == LOCKED_FOREVER) return;
         if (additionalTime == LOCK_FOREVER || LOCKED_FOREVER - unlockTime <= additionalTime) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
@@ -650,7 +763,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     function migrate(uint256 id, Snapshot calldata snapshot, bytes calldata successorParams) external returns (address token) {
         if (address(_successor) == address(0)) revert MigrateNotAvailable();
         verifySnapshot(id, snapshot);
-        (uint40 unlockTime, address owner) = _getAndValidateCertificateInfo(id);
+        (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
+        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
         if (_migrated[pool]) revert AlreadyMigrated();

@@ -5,6 +5,12 @@ pragma solidity ^0.8.26;
 import {Permit} from "shared/src/structs/Permit.sol";
 
 interface ILiquidityVault {
+    enum CollectFeeOption {
+        TOKEN_0,
+        TOKEN_1,
+        BOTH
+    }
+
     struct MintParams {
         address tokenA;
         address tokenB;
@@ -13,6 +19,8 @@ interface ILiquidityVault {
         uint256 amountA;
         uint256 amountB;
         uint32 lockDuration;
+        uint16 feeDiscountLeverBIPS;
+        CollectFeeOption collectFeeOption;
     }
 
     struct Snapshot {
@@ -32,7 +40,7 @@ interface ILiquidityVault {
 
     function WETH() external pure returns (address);
     function ETH() external pure returns (address);
-    function fees() external view returns (uint256, uint256, uint256);
+    function fees() external view returns (uint256, uint256, uint256, uint256, uint256, uint256);
     function unlockTime(uint256 id) external view returns (uint256);
 
     // API
