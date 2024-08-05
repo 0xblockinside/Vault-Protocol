@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.26;
 
-import {Permit} from "shared/src/structs/Permit.sol";
+import {Permit} from "shared/structs/Permit.sol";
 
 interface ILiquidityVault {
     enum CollectFeeOption {

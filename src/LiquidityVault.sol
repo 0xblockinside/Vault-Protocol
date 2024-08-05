@@ -4,12 +4,12 @@ pragma solidity ^0.8.26;
 
 import {Ownable} from "solady/src/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/src/utils/SafeTransferLib.sol";
-import {ERC721Extended} from "shared/src/tokens/ERC721Extended.sol";
-import {Permit} from "shared/src/structs/Permit.sol";
+import {ERC721Extended} from "shared/tokens/ERC721Extended.sol";
+import {Permit} from "shared/structs/Permit.sol";
 import {Math} from "openzeppelin/utils/math/Math.sol";
 
-import {IWETH9} from "shared/src/tokens/IWETH9.sol";
-import {IPermitERC20, IERC20} from "shared/src/interfaces/IERC20Extended.sol";
+import {IWETH9} from "shared/interfaces/IWETH9.sol";
+import {IPermitERC20, IERC20} from "shared/interfaces/IERC20Extended.sol";
 import {IUniswapV2Factory} from "v2-core/interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "v2-core/interfaces/IUniswapV2Pair.sol";
 import {IPayMaster} from "./interfaces/IPayMaster.sol";
@@ -354,7 +354,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
     //////////            SETTERS             //////////////
-    function setFees(uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) external onlyOwner {
+    function setFees(
+        uint256 mintFee, 
+        uint256 refMintFeeBIPS,
+        uint256 refMintDiscountBIPS, 
+        uint256 refCollectFeeBIPS, 
+        uint256 mintDiscountBIPS, 
+        uint256 minProtocolCollectFeeBIPS) external onlyOwner {
         (, , , , , uint256 _minProtocolCollectFeesBIPS) = _decodeFeeSlot(_feeSlot);
         if (minProtocolCollectFeeBIPS > _minProtocolCollectFeesBIPS) revert InvalidFee();
         if (refCollectFeeBIPS + minProtocolCollectFeeBIPS > FEE_DIVISOR) revert InvalidFee();

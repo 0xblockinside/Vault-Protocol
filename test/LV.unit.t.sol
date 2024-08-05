@@ -10,7 +10,7 @@ import {TestTaxedERC20} from "./tokens/TestTaxedERC20.sol";
 import {IUniswapV2Pair} from "v2-core/interfaces/IUniswapV2Pair.sol";
 import {IUniswapV3Pool} from "v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import {IMintableERC20} from "./interfaces/IMintableERC20.sol";
-import {NoPermit} from "shared/src/structs/Permit.sol";
+import {NoPermit} from "shared/structs/Permit.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {IUniswapV2Router02} from "v2-periphery/interfaces/IUniswapV2Router02.sol";
 import {ISwapRouter02} from "swap-router-contracts/interfaces/ISwapRouter02.sol";

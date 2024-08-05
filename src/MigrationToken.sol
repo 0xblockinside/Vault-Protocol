@@ -3,8 +3,8 @@
 pragma solidity ^0.8.26;
 
 import {ERC20} from "solady/src/tokens/ERC20.sol";
-import {IPermitERC20} from "shared/src/interfaces/IERC20Extended.sol";
-import {Permit} from "shared/src/structs/Permit.sol";
+import {IPermitERC20} from "shared/interfaces/IERC20Extended.sol";
+import {Permit} from "shared/structs/Permit.sol";
 import {SafeTransferLib} from "solady/src/utils/SafeTransferLib.sol";
 
 contract Token is ERC20 {
