@@ -1,0 +1,13 @@
+@openzeppelin/=lib/shared/lib/openzeppelin-contracts/
+ds-test/=lib/forge-std/lib/ds-test/src/
+erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/
+forge-std/=lib/forge-std/src/
+openzeppelin-contracts/=lib/openzeppelin-contracts/
+openzeppelin/=lib/openzeppelin-contracts/contracts/
+shared/=lib/shared/src/
+solady/=lib/solady/
+swap-router-contracts/=lib/swap-router-contracts/contracts/
+v2-core/=lib/v2-core/contracts/
+v2-periphery/=lib/v2-periphery/contracts/
+@uniswap/v3-core/=lib/v3-core
+@uniswap/v3-periphery/=lib/v3-periphery/

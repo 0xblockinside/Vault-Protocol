@@ -59,13 +59,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CONSTANTS                            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    bytes32 public constant INIT_CODE_HASH = 0x4156ccc01dad273e6c65c4335c428a2ff4a4b0c95a9a228f6bfed45a069d3fe7;
-    IUniswapV2Factory public constant V2_FACTORY = IUniswapV2Factory(0x7E0987E5b3a30e3f2828572Bb659A548460a3003);
+    bytes32 /*public*/ constant INIT_CODE_HASH = 0x4156ccc01dad273e6c65c4335c428a2ff4a4b0c95a9a228f6bfed45a069d3fe7;
+    IUniswapV2Factory /*public*/ constant V2_FACTORY = IUniswapV2Factory(0x7E0987E5b3a30e3f2828572Bb659A548460a3003);
     address public constant WETH = 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9;
     address public constant ETH = address(0);
     uint32 public constant LOCK_FOREVER = type(uint32).max;
-    uint40 public constant LOCKED_FOREVER = type(uint40).max;
-    uint16 public constant FEE_DIVISOR = 10_000;
+    uint40 /*public*/ constant LOCKED_FOREVER = type(uint40).max;
+    uint16 public constant BIP_DIVISOR = 10_000;
     IPayMaster immutable payMaster;
 
 
@@ -95,14 +95,19 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     uint256 private _idTracker;
 
-    /// Bits Layout of '_feeSlot':
-    /// - [0..159]    160 bits   `mintFee`
-    /// - [160..175]   16 bits   `refMintFeeBIPS`
-    /// - [176..191]   16 bits   `refMintDiscountBIPS`
-    /// - [192..207]   16 bits   `refCollectFeeBIPS`
-    /// - [208..223]   16 bits   `mintDiscountBIPS`
-    /// - [224..239]   16 bits   `minProtocolCollectFeeBIPS`
-    uint256 _feeSlot = 0.1 ether << 16 | 2_000;
+    /// Bits Layout of '_feeInfoSlot':
+    /// - [0..159]    160 bits   `mintMaxFee`
+    /// - [160..175]   16 bits   `refMintFeeCutBIPS`
+    /// - [176..191]   16 bits   `refCollectFeeCutBIPS`
+    /// - [192..207]   16 bits   `refMintDiscountBIPS`
+    /// - [208..223]   16 bits   `mintMaxDiscountBIPS`
+    /// - [224..239]   16 bits   `protocolMinCollectFeeCutBIPS`
+    uint256 _feeInfoSlot = 0.1 ether | 
+            0 << 160 |
+        7_333 << 176 |
+        5_000 << 192 |
+       10_000 << 208 |
+        2_667 << 224;
 
     ISuccessor _successor;
 
@@ -110,7 +115,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /// Bits Layout of 'hashInfoForCertificateID.slot':
     /// - [0..159]     160 bits  `snapshotHash: keccak256(abi.encodePacked(token0, token1, snapshotIn0, snapshotIn1, liquidity))`
     /// - [160..256]    96 bits  `referralHash`
-    mapping(uint256 => bytes32) public hashInfoForCertificateID;
+    mapping(uint256 => bytes32) /*public*/ hashInfoForCertificateID;
 
     mapping(address => bool) public registeredReferrers;
 
@@ -122,8 +127,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
     /// Bits Layout of 'extraData':
     /// - [0..39]    40 bits   `unlockTime`
-    /// - [40..55]   16 bits   `feeLeverBIPS`
-    /// - [56..58]   16 bits   `collectFeeLeverOption`
+    /// - [40..55]   16 bits   `feeLevelBIPS`
+    /// - [56..58]    3 bits   `collectFeeOption`
+    /// - [59]        1 bits   `ignoreReferrer`
 
     constructor(IPayMaster pm) {
         payMaster = pm;
@@ -133,34 +139,39 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  PRIVATE FUNCTIONS                         */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    function _decodeExtraData(uint96 slot) internal pure returns (uint40 unlockTime, uint16 feeLeverBIPS, CollectFeeOption collectFeeOption) {
+    function _decodeExtraData(uint96 slot) internal pure returns (uint40 unlockTime, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) {
         unlockTime = uint40(slot);
-        feeLeverBIPS = uint16(slot >> 40);
-        collectFeeOption = CollectFeeOption(uint8(slot >> 56));
+        feeLevelBIPS = uint16(slot >> 40);
+        collectFeeOption = CollectFeeOption(uint8((slot >> 56) & 0x7));
+        ignoreReferrer = (slot >> 59) & 0x1 == 1;
     }
 
-    function _encodeExtraData(uint40 unlockTime, uint16 feeLeverBIPS, CollectFeeOption collectFeeOption) internal pure returns (uint96 extraData) {
-        extraData = uint96(unlockTime) | (uint96(feeLeverBIPS) << 40) | (uint96(uint8(collectFeeOption)) << 56);
+    function _encodeExtraData(uint40 unlockTime, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) internal pure returns (uint96 extraData) {
+        extraData = uint96(unlockTime) | 
+                    (uint96(feeLevelBIPS) << 40) | 
+                    (uint96(uint8(collectFeeOption) & 0x7) << 56) |
+                    (ignoreReferrer ? uint96(1) << 59 : 0);
     }
 
-    function _decodeFeeSlot(uint256 slot) internal pure returns (uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) {
-        uint256 bit16Mask = ((1 << 16) - 1);
-        mintFee = uint160(slot);
-        refMintFeeBIPS = (slot >> 160) & bit16Mask;
-        refMintDiscountBIPS = (slot >> 176) & bit16Mask;
-        refCollectFeeBIPS = (slot >> 192) & bit16Mask;
-        mintDiscountBIPS = (slot >> 208) & bit16Mask;
-        minProtocolCollectFeeBIPS = (slot >> 224) & bit16Mask;
+    function _decodeFeeSlot(uint256 slot) internal pure returns (FeeInfo memory) {
+        return FeeInfo({
+            mintMaxFee: uint160(slot),
+            refMintFeeCutBIPS: uint16(slot >> 160),
+            refCollectFeeCutBIPS: uint16(slot >> 176),
+            refMintDiscountBIPS: uint16(slot >> 192),
+            mintMaxDiscountBIPS: uint16(slot >> 208),
+            procotolCollectMinFeeCutBIPS: uint16(slot >> 224)
+        });
     }
 
-    function _encodeFeeSlot(uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) internal pure returns (uint256 slot) {
-        slot = uint256(uint160(mintFee)) |
-               (refMintFeeBIPS << 160) |
-               (refMintDiscountBIPS << 176) |
-               (refCollectFeeBIPS << 192) |
-               (mintDiscountBIPS << 208) |
-               (minProtocolCollectFeeBIPS << 224);
-    }
+    // function _encodeFeeSlot(FeeInfo memory feeInfo) internal pure returns (uint256 slot) {
+    //     slot = uint256(uint160(feeInfo.mintMaxFee)) |
+    //            (feeInfo.refMintFeeCutBIPS << 160) |
+    //            (feeInfo.refCollectFeeCutBIPS << 176) |
+    //            (feeInfo.refMintDiscountBIPS << 192) |
+    //            (feeInfo.mintMaxDiscountBIPS << 208) |
+    //            (feeInfo.procotolCollectMinFeeCutBIPS << 224);
+    // }
 
     function _encodeHashInfo(uint160 snapshotHash, uint96 referralHash) internal pure returns (bytes32) {
         return bytes32((uint256(referralHash) << 160) | uint256(snapshotHash));
@@ -304,17 +315,12 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         swappedOwnerFee = amountOut - swappedCut;
     }
 
-    function _payFeeCut(uint256 cut, address token, uint256 protocolBIPS, uint256 refBIPS, bool toReferrer) internal {
-        if (cut == 0) return;
-
-        uint refCut = cut * refBIPS / (protocolBIPS + refBIPS);
-        if (token == WETH) payMaster.payFees{ value: cut }(toReferrer ? cut - refCut : cut);
+    function _payFeeCut(uint256 refCut, uint256 protocolCut, address token) internal {
+        if (refCut + protocolCut == 0) return;
+        if (token == WETH) payMaster.payFees{ value: refCut + protocolCut }(protocolCut);
         else {
-            if (!toReferrer) SafeTransferLib.safeTransfer(token, payMaster.OWNER(), cut);
-            else {
-                if (refCut > 0) SafeTransferLib.safeTransfer(token, address(payMaster), refCut);
-                if (cut - refCut> 0) SafeTransferLib.safeTransfer(token, address(payMaster), cut - refCut);
-            }
+            if (refCut > 0) SafeTransferLib.safeTransfer(token, address(payMaster), refCut);
+            if (protocolCut > 0) SafeTransferLib.safeTransfer(token, payMaster.OWNER(), refCut);
         }
     }
 
@@ -331,45 +337,47 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
     //////////            GETTERS           //////////////
-    function fees() external view returns (uint256 mintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, uint256 refCollectFeeBIPS, uint256 mintDiscountBIPS, uint256 minProtocolCollectFeeBIPS) { 
-        (mintFee, refMintFeeBIPS, refMintDiscountBIPS, refCollectFeeBIPS, mintDiscountBIPS, minProtocolCollectFeeBIPS) = _decodeFeeSlot(_feeSlot);
-    }
-
-    function mintFee(bool isReferred, uint16 feeLevelBIPS) public returns (uint256 mintFee, uint256 refFeeCut) {
-        (uint256 maxMintFee, uint256 refMintFeeBIPS, uint256 refMintDiscountBIPS, , uint256 mintDiscountBIPS, ) = _decodeFeeSlot(_feeSlot);
+    function mintFee(bool isReferred, uint16 feeLevelBIPS) public view returns (uint256 mintFee, uint256 refFeeCut) {
+        FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
         if (isReferred) {
-            mintFee = maxMintFee * refMintDiscountBIPS / FEE_DIVISOR;
-            refFeeCut = maxMintFee * refMintFeeBIPS / FEE_DIVISOR;
+            mintFee = feeInfo.mintMaxFee * feeInfo.refMintDiscountBIPS / BIP_DIVISOR;
+            refFeeCut = feeInfo.mintMaxFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR;
         }
         else {
-            uint256 discount = maxMintFee * mintDiscountBIPS / FEE_DIVISOR;
-            mintFee = maxMintFee - discount * uint256(feeLevelBIPS) / FEE_DIVISOR;
+            uint256 discount = feeInfo.mintMaxFee * feeInfo.mintMaxDiscountBIPS / BIP_DIVISOR;
+            mintFee = feeInfo.mintMaxFee - discount * uint256(feeLevelBIPS) / BIP_DIVISOR;
         }
-
     }
 
+    // function collectFeeOption(uint256 id) view external returns (CollectFeeOption collectFeeOption) {
+    //     (, , collectFeeOption,) = _decodeExtraData(_getExtraData(id));
+    // }
 
-    function unlockTime(uint256 id) view external returns (uint256) {
-        return uint256(uint40(_getExtraData(id)));
-    }
+
+    // function unlockTime(uint256 id) view external returns (uint256) {
+    //     return uint256(uint40(_getExtraData(id)));
+    // }
 
     //////////            SETTERS             //////////////
-    function setFees(
-        uint256 mintFee, 
-        uint256 refMintFeeBIPS,
-        uint256 refMintDiscountBIPS, 
-        uint256 refCollectFeeBIPS, 
-        uint256 mintDiscountBIPS, 
-        uint256 minProtocolCollectFeeBIPS) external onlyOwner {
-        (, , , , , uint256 _minProtocolCollectFeesBIPS) = _decodeFeeSlot(_feeSlot);
-        if (minProtocolCollectFeeBIPS > _minProtocolCollectFeesBIPS) revert InvalidFee();
-        if (refCollectFeeBIPS + minProtocolCollectFeeBIPS > FEE_DIVISOR) revert InvalidFee();
-        if (refMintFeeBIPS > FEE_DIVISOR) revert InvalidFee();
-        if (refMintDiscountBIPS > FEE_DIVISOR) revert InvalidFee();
-        if (refCollectFeeBIPS > FEE_DIVISOR) revert InvalidFee();
-        if (mintDiscountBIPS > FEE_DIVISOR) revert InvalidFee();
+    // TODO: if feeINfo is calldata is there any benefits or is it actuall less permoanct since it
+    // needs to be copied 
+    function setFees(FeeInfo calldata feeInfo) external onlyOwner {
+        FeeInfo memory oldFeeInfo = _decodeFeeSlot(_feeInfoSlot);
+        if (feeInfo.procotolCollectMinFeeCutBIPS > oldFeeInfo.procotolCollectMinFeeCutBIPS) revert InvalidFee();
+        if (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
+        if (feeInfo.refMintFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
+        if (feeInfo.refMintDiscountBIPS > BIP_DIVISOR) revert InvalidFee();
+        if (feeInfo.refCollectFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
+        if (feeInfo.mintMaxDiscountBIPS > BIP_DIVISOR) revert InvalidFee();
 
-        _feeSlot = _encodeFeeSlot(mintFee, refMintFeeBIPS, refMintDiscountBIPS, refCollectFeeBIPS, mintDiscountBIPS, minProtocolCollectFeeBIPS);
+        /// @dev inlined what would have been _encodeFeeSlot for smaller bytecode
+        _feeInfoSlot = uint256(uint160(feeInfo.mintMaxFee)) |
+               (feeInfo.refMintFeeCutBIPS << 160) |
+               (feeInfo.refCollectFeeCutBIPS << 176) |
+               (feeInfo.refMintDiscountBIPS << 192) |
+               (feeInfo.mintMaxDiscountBIPS << 208) |
+               (feeInfo.procotolCollectMinFeeCutBIPS << 224);
+
     }
 
     function setSuccessor(address successor) external onlyOwner {
@@ -380,11 +388,18 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         registeredReferrers[referrer] = value;
     }
 
-    function setCollectFeeOptions(uint256 id, CollectFeeOption feeOption) external {
+    function setCollectFeeOption(uint256 id, CollectFeeOption feeOption) external {
         (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
-        (uint40 unlockTime, uint16 feeLeverBIPS, ) = _decodeExtraData(extraData);
+        (uint40 unlockTime, uint16 feeLeverBIPS, , bool ignoreReferrer) = _decodeExtraData(extraData);
 
-        _setOwnershipSlot(id, owner, _encodeExtraData(unlockTime, feeLeverBIPS, feeOption));
+        _setOwnershipSlot(id, owner, _encodeExtraData(unlockTime, feeLeverBIPS, feeOption, ignoreReferrer));
+    }
+
+    function _resetReferralHash(uint256 id, address referrer, uint160 snapshotHash) internal {
+        hashInfoForCertificateID[id] = _encodeHashInfo(
+            snapshotHash,
+            uint96(uint256(keccak256(abi.encodePacked(referrer, uint256(0)))))
+        );
     }
 
 
@@ -397,12 +412,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     function resetReferralHash(uint256 id, address referrer) external {
         if (msg.sender != address(payMaster)) revert NotPayMaster();
 
-        (uint160 snapshotHash, uint96 referralHash) = _decodeHashInfo(hashInfoForCertificateID[id]);
-        referralHash = uint96(uint256(keccak256(abi.encodePacked(referrer, uint256(0)))));
-        hashInfoForCertificateID[id] = _encodeHashInfo(
-            snapshotHash,
-            referralHash   
-        );
+        (uint160 snapshotHash, ) = _decodeHashInfo(hashInfoForCertificateID[id]);
+        _resetReferralHash(id, referrer, snapshotHash);
     }
 
 
@@ -419,7 +430,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      *        - uint256 amountA: The amount of tokenA to add to the pool.
      *        - uint256 amountB: The amount of tokenB to add to the pool.
      *        - uint32 lockDuration: The duration for which the liquidity should be locked.
-     *        - uint16 feeDiscountLeverBIPS: The amount of discount the user choses for their mint fee (BIPS)
+     *        - uint16 feeLevelBIPS: The amount of discount the user choses for their mint fee (BIPS)
      *        - CollectFeeOption collectFeeOption: The amount of discount the user choses for their mint fee (BIPS)
      * @return id The ID of the minted liquidity position.
      * @return snapshot A data structure representing the snapshot of the users liquidity position 
@@ -428,7 +439,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         bool isReferred = referrer != address(0);
         if (isReferred && !registeredReferrers[referrer]) revert NotRegisteredRefferer();
 
-        (uint256 mintFee, uint256 refMintFeeCut) = mintFee(isReferred, params.feeDiscountLeverBIPS);
+        (uint256 mintFee, uint256 refMintFeeCut) = mintFee(isReferred, params.feeLevelBIPS);
         uint256 protocolMintFeeCut = mintFee - refMintFeeCut;
         uint96 referrerHash = isReferred ? uint96(uint256(keccak256(abi.encodePacked(referrer, refMintFeeCut)))) : 0;
 
@@ -490,14 +501,14 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             isReferred ? abi.encode(uint256(refMintFeeCut)) : bytes("")
         );
 
-        _setOwnershipSlot(_idTracker, recipient, _encodeExtraData(unlockTime, params.feeDiscountLeverBIPS, params.collectFeeOption));
+        _setOwnershipSlot(_idTracker, recipient, _encodeExtraData(unlockTime, isReferred ? 0 : params.feeLevelBIPS, params.collectFeeOption, false));
         _incrementBalance(recipient, 1);
         _idTracker++;
     }
 
-    function mint(MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot) {
-        return mint(msg.sender, address(0), params);
-    }
+    // function mint(MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot) {
+    //     return mint(msg.sender, address(0), params);
+    // }
 
     /**
      * @notice Collects owed fees from a Uniswap V2 liquidity pool without compromising the security and properties of the lock.
@@ -515,7 +526,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 fee0, uint256 fee1) {
         (, uint96 referralHash) = verifySnapshot(id, snapshot);
         (address owner, uint96 extraData) = _getOwnershipSlot(id);
-        (, uint256 feeDiscountLeverBIPS, CollectFeeOption feeOptions) = _decodeExtraData(extraData);
+        (, uint256 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) = _decodeExtraData(extraData);
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
         uint256 balance0 = IERC20(snapshot.token0).balanceOf(pool);
@@ -542,22 +553,22 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 amountIn1 = liquidity * (balance1 - fee1) / totalLiquidity;
 
         /// @section Fee Breakdown
-        ( , , , uint256 refCollectFeeBIPS, , uint256 minProtocolCollectFeeBIPS) = _decodeFeeSlot(_feeSlot);
+        FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
         (uint256 cut0, uint256 cut1) = (0, 0);
 
-        if (referralHash != 0) (cut0, cut1) = (
-            fee0 * (refCollectFeeBIPS + minProtocolCollectFeeBIPS) / FEE_DIVISOR, 
-            fee1 * (refCollectFeeBIPS + minProtocolCollectFeeBIPS) / FEE_DIVISOR);
+        if (referralHash != 0 && !ignoreReferrer) (cut0, cut1) = (
+            fee0 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR, 
+            fee1 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR);
         else {
-            // if feeDiscountLeverBIPS max it was max discount, therefore smallest amount of fee and ther fore greatst amount to protcol
-            uint256 lowFeeCut0 = fee0 * minProtocolCollectFeeBIPS / FEE_DIVISOR;
-            uint256 lowFeeCut1 = fee1 * minProtocolCollectFeeBIPS / FEE_DIVISOR;
+            // if feeLevelBIPS max it was max discount, therefore smallest amount of fee and ther fore greatst amount to protcol
+            uint256 lowFeeCut0 = fee0 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
+            uint256 lowFeeCut1 = fee1 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
 
             /// @dev highest userFeeDiscountBIPS == 10_000 (100%) => gives protocol (fee0, fee1)
             ///      lowest  userFeeDiscountBIPS ==      0   (0%) => gives protocol (lowFeeCut0, lowFeeCut1)
             (cut0, cut1) = (
-                lowFeeCut0 + (fee0 - lowFeeCut0) * feeDiscountLeverBIPS / FEE_DIVISOR,
-                lowFeeCut1 + (fee1 - lowFeeCut1) * feeDiscountLeverBIPS / FEE_DIVISOR
+                lowFeeCut0 + (fee0 - lowFeeCut0) * feeLevelBIPS / BIP_DIVISOR,
+                lowFeeCut1 + (fee1 - lowFeeCut1) * feeLevelBIPS / BIP_DIVISOR
             );
         }
 
@@ -567,8 +578,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 swapCut0For1 = snapshot.token1 == WETH ? cut0 : 0;
         uint256 swapCut1For0 = snapshot.token0 == WETH ? cut1 : 0;
 
-        uint256 ownerSwap0For1 = feeOptions == CollectFeeOption.TOKEN_1 ? ownerFee0 : 0;
-        uint256 ownerSwap1For0 = feeOptions == CollectFeeOption.TOKEN_0 ? ownerFee1 : 0;
+        uint256 ownerSwap0For1 = collectFeeOption == CollectFeeOption.TOKEN_1 ? ownerFee0 : 0;
+        uint256 ownerSwap1For0 = collectFeeOption == CollectFeeOption.TOKEN_0 ? ownerFee1 : 0;
 
         /// @dev all fee cuts will be taken in SUPPORTED BASE TOKENS whenever possible
         (uint256 swapedCut0, uint256 swapedOwnerFees0) = _swapFeesIfNeccessary(pool, snapshot.token0, snapshot.token1, true, swapCut1For0, ownerSwap1For0);
@@ -582,24 +593,25 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         if (snapshot.token0 == WETH) IWETH9(WETH).withdraw(ownerFee0 + cut0);
         if (snapshot.token1 == WETH) IWETH9(WETH).withdraw(ownerFee1 + cut1);
 
-        // Payout: referrer or protocol
-        _payFeeCut(cut0, snapshot.token0, minProtocolCollectFeeBIPS, refCollectFeeBIPS, referralHash != 0);
-        _payFeeCut(cut1, snapshot.token1, minProtocolCollectFeeBIPS, refCollectFeeBIPS, referralHash != 0);
-
         // Payout: owner
         if (snapshot.token0 == WETH) payable(owner).transfer(ownerFee0);
         else SafeTransferLib.safeTransfer(snapshot.token0, owner, ownerFee0);
         if (snapshot.token1 == WETH) payable(owner).transfer(ownerFee1);
         else SafeTransferLib.safeTransfer(snapshot.token1, owner, ownerFee1);
 
+        // Payout: referrer or protocol
+        uint256 refCut0 = referralHash != 0 ? cut0 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) : 0;
+        uint256 refCut1 = referralHash != 0 ? cut1 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) : 0;
+        _payFeeCut(refCut0, cut0 - refCut0, snapshot.token0);
+        _payFeeCut(refCut1, cut1 - refCut1, snapshot.token1);
+
         // Update the Payout Merkle root
         if (referralHash != 0) {
             referralHash = uint96(uint256(keccak256(abi.encodePacked(
-                uint96(uint256(keccak256(abi.encodePacked(referralHash, cut0)))),
-                cut1 
+                uint96(uint256(keccak256(abi.encodePacked(referralHash, refCut0)))),
+               refCut1 
             ))));
         }
-
 
         hashInfoForCertificateID[id] = _encodeHashInfo(
             _encodeSnapshotID(Snapshot({
@@ -612,8 +624,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             referralHash
         );
 
-        uint256 refCut0 = referralHash != 0 ? cut0 * refCollectFeeBIPS / (refCollectFeeBIPS + minProtocolCollectFeeBIPS) : 0;
-        uint256 refCut1 = referralHash != 0 ? cut1 * refCollectFeeBIPS / (refCollectFeeBIPS + minProtocolCollectFeeBIPS) : 0;
         emit Collected(
             id, 
             fee0,
@@ -640,7 +650,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external {
         verifySnapshot(id, snapshot);
         (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
-        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
+        (uint40 unlockTime, , ,) = _decodeExtraData(extraData);
         if (unlockTime == LOCKED_FOREVER || block.timestamp <= unlockTime) revert NotUnlocked();
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
@@ -657,14 +667,53 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      * @param id The id of the liquidity position.
      * @param additionalTime The additional time to extend the lock duration. If set to LOCK_FOREVER, the position will be locked forever.
      */
-    function extend(uint256 id, uint32 additionalTime) external {
+    function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external {
+        // If you have served part of your lock you should be able to collect fee lever
+        // or perhaps at least get rid of your referrer
+        uint256 graceBuffer = 2 days;
+
         (uint96 extraData, ) = _getAndValidateCertificateInfo(id);
-        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
+        (uint40 unlockTime, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) = _decodeExtraData(extraData);
+
+        if (block.timestamp > uint256(unlockTime) || (unlockTime - block.timestamp) <= graceBuffer) {
+            (uint160 snapshotHash, uint96 referralHash) = _decodeHashInfo(hashInfoForCertificateID[id]);
+            bool hadReferrer = referralHash != 0;
+            bool wantsReferrer = referrer != address(0);
+
+            uint256 refundETH;
+            if (newFeeLevelBIPS < feeLevelBIPS) {
+                FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
+                uint256 feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
+                refundETH = _validateFunds(feeOwed, 0);
+
+                // Pay Fee
+                payMaster.payFees{ value: feeOwed }(feeOwed);
+
+                feeLevelBIPS = newFeeLevelBIPS;
+            }
+            if (wantsReferrer) {
+                if (hadReferrer) {
+                    uint96 zeroedReferrerHash = uint96(uint256(keccak256(abi.encodePacked(oldReferrer, uint256(0)))));
+                    /// @dev: Old referrer account must be zeroed
+                    if (referralHash != zeroedReferrerHash) revert();
+                }
+                _resetReferralHash(id, referrer, snapshotHash);    
+                ignoreReferrer = false;
+            }
+
+            if (hadReferrer && !wantsReferrer) {
+                // need to flag the extradata
+                ignoreReferrer = true;
+            }
+        }
+        
         if (unlockTime == LOCKED_FOREVER) return;
         if (additionalTime == LOCK_FOREVER || LOCKED_FOREVER - unlockTime <= additionalTime) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
 
-        _setExtraData(id, uint96(unlockTime));
+        if (block.timestamp < unlockTime) revert(); /// @dev invalid extend time
+
+        _setExtraData(id, _encodeExtraData(unlockTime, feeLevelBIPS, collectFeeOption, ignoreReferrer));
         emit Extended(id, additionalTime);
     }
 
@@ -770,7 +819,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         if (address(_successor) == address(0)) revert MigrateNotAvailable();
         verifySnapshot(id, snapshot);
         (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
-        (uint40 unlockTime, , ) = _decodeExtraData(extraData);
+        (uint40 unlockTime, , ,) = _decodeExtraData(extraData);
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
         if (_migrated[pool]) revert AlreadyMigrated();

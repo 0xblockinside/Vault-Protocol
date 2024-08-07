@@ -109,14 +109,16 @@ contract LiquidityVaultUnitTests is Test {
     LiquidityVault lVault;
     LiquidityVaultPayMaster payMaster;
     address WETH;
-    uint FEE_DIVISOR;
+    address ETH;
+    uint BIP_DIVISOR;
 
     function setUp() external {
         payMaster = new LiquidityVaultPayMaster(address(this));
         lVault = new LiquidityVault(payMaster);
         payMaster.setLiquidityVault(address(lVault));
         WETH = lVault.WETH();
-        FEE_DIVISOR = lVault.FEE_DIVISOR();
+        ETH = lVault.ETH();
+        BIP_DIVISOR = lVault.BIP_DIVISOR();
     }
 
     receive() external payable { }
@@ -181,16 +183,15 @@ contract LiquidityVaultUnitTests is Test {
     }
 
 
-    function _mintLockedLPPosition(address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, uint rMintPercent, uint collectPercent) {
+    function _mintLockedLPPosition(address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, uint rMintPercent, uint collectPercent) {
         IERC20 tokenA = IERC20(token == address(0) ? address(new TestERC20()) : token);
         amountTokenIn = token == address(0) ? tokenA.totalSupply() : amountTokenIn;
         tokenA.approve(address(lVault), amountTokenIn);
         targetToken = address(tokenA);
         uint startDevBal = address(this).balance;
         
-        (mintFee, rMintPercent, collectPercent) = lVault.fees();
+        (mintFee, refMintFeeCut) = lVault.mintFee(referrer != address(0), feeLevelBIPS);
         ILiquidityVault.Snapshot memory mintSnapshot;
-        address ETH = lVault.ETH();
         if (expectedRevert != 0) vm.expectRevert(expectedRevert);
         (id, mintSnapshot) = lVault.mint{ value: amountETHIn + mintFee }(msg.sender, referrer, ILiquidityVault.MintParams({
             tokenA: address(tokenA),
@@ -199,7 +200,9 @@ contract LiquidityVaultUnitTests is Test {
             permitB: NoPermit(),
             amountA: amountTokenIn,
             amountB: amountETHIn,
-            lockDuration: lockDuration
+            lockDuration: lockDuration,
+            feeDiscountLeverBIPS: feeLevelBIPS,
+            collectFeeOption: collectFeeOption
         }));
 
         if (expectedRevert != 0) return (0, address(0), address(0), ILiquidityVault.Snapshot(address(0), address(0), 0, 0, 0), false, 0, 0, 0, 0);
@@ -246,7 +249,7 @@ contract LiquidityVaultUnitTests is Test {
         lVault.redeem(id, snapshot, Probability({ chance: 50, seed: boolSeed }).isLikely());
     }
 
-    function test_refundSurplusFundsETH(uint ethSeed, uint surplusSeed, uint wethSeed) external {
+    function test_refundSurplusFundsETH(uint ethSeed, uint surplusSeed) external {
         vm.skip(false);
         startHoax(msg.sender);
 
@@ -260,17 +263,10 @@ contract LiquidityVaultUnitTests is Test {
 
         uint preBal = msg.sender.balance;
 
-        bool surplusAsWETH = Probability({ chance: 50, seed: wethSeed}).isLikely();
-        if (surplusAsWETH) {
-            console.log("[TEST] surplus as WETH");
-            IWETH9(WETH).deposit{value: surplus}();
-            IERC20(WETH).transfer(address(lVault), surplus);
-        }
-
         (uint mintFee, , ) = lVault.fees();
-        lVault.mint{ value: amountETHIn + mintFee + (surplusAsWETH ? 0 : surplus) }(msg.sender, address(0), ILiquidityVault.MintParams({
+        lVault.mint{ value: amountETHIn + mintFee + surplus }(msg.sender, address(0), ILiquidityVault.MintParams({
             tokenA: address(tokenA),
-            tokenB: lVault.ETH(),
+            tokenB: ETH,
             permitA: NoPermit(),
             permitB: NoPermit(),
             amountA: amountTokenIn,
@@ -281,6 +277,7 @@ contract LiquidityVaultUnitTests is Test {
         assertEq(preBal - msg.sender.balance, amountETHIn + mintFee);
     }
 
+    // TODO: merge with above
     function test_refundSurplusToken(uint deficitSeed, uint ethSeed) external {
         vm.skip(false);
         startHoax(msg.sender);
@@ -288,15 +285,13 @@ contract LiquidityVaultUnitTests is Test {
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
 
         TestERC20 tokenA = new TestERC20();
-        uint amountTokenIn = 1 + (tokenA.totalSupply() - 1) * _bound(deficitSeed, 0, 10_000) / 10_000;
+        uint amountTokenIn = 1 + (tokenA.totalSupply() - 1) * _bound(deficitSeed, 0, BIP_DIVISOR) / BIP_DIVISOR;
         tokenA.approve(address(lVault), amountTokenIn);
         uint amountETHIn = _bound(ethSeed, 0.1 ether, 70 ether);
 
 
-        (uint mintFee, , ) = lVault.fees();
+        (uint mintFee, , ) = lVault.mintFee(false, 0);
 
-        // solhint-disable-next-line
-        address ETH = lVault.ETH();
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
         lVault.mint{ value: amountETHIn + mintFee }(msg.sender, address(0), ILiquidityVault.MintParams({
@@ -327,8 +322,6 @@ contract LiquidityVaultUnitTests is Test {
 
         (uint mintFee, , ) = lVault.fees();
 
-        // solhint-disable-next-line
-        address ETH = lVault.ETH();
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
         vm.expectRevert(INSUFFICIENT_FUNDS);
@@ -496,10 +489,10 @@ contract LiquidityVaultUnitTests is Test {
         bytes4 INVALID_FEE = bytes4(keccak256("InvalidFee()"));
         (uint mintFee, uint rMintPercent, uint collectPercent) = lVault.fees();
         uint newMintFee = _bound(mintFeeSeed, 0, 2 ** 240 - 1);
-        uint newMintPercent = _bound(mintPercentSeed, 0, FEE_DIVISOR);
-        uint newInvalidMintPercent = _bound(mintPercentSeed, FEE_DIVISOR + 1, type(uint).max);
+        uint newMintPercent = _bound(mintPercentSeed, 0, BIP_DIVISOR);
+        uint newInvalidMintPercent = _bound(mintPercentSeed, BIP_DIVISOR + 1, type(uint).max);
         uint newCollectPercent = _bound(mintPercentSeed, 0, collectPercent);
-        uint newInvalidCollectPercent = _bound(collectPercentSeed, collectPercent + 1, FEE_DIVISOR);
+        uint newInvalidCollectPercent = _bound(collectPercentSeed, collectPercent + 1, BIP_DIVISOR);
         
         vm.expectRevert(INVALID_FEE);
         lVault.setFees(newMintFee, newInvalidMintPercent, newCollectPercent);
@@ -614,7 +607,7 @@ contract LiquidityVaultUnitTests is Test {
         
 
         if (Probability({ seed: immediateCollectSeed, chance: 50 }).isLikely()) {
-            assertEq(rMintFee, mintFee * rMintPercent / FEE_DIVISOR);
+            assertEq(rMintFee, mintFee * rMintPercent / BIP_DIVISOR);
 
             LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
             params[0] = LiquidityVaultPayMaster.ClaimParams({
