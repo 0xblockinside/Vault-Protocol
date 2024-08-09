@@ -17,6 +17,8 @@ import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
 import {Token} from "./MigrationToken.sol";
 import {ISuccessor} from "./interfaces/ISuccessor.sol";
 
+import "forge-std/Test.sol";
+
 
 /// @notice A Liquidity Locker for Uniswap V2 that allows for fee collection without
 ///         compromising token traders safety.
@@ -80,6 +82,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     error NotPayMaster();
     error NotRegisteredRefferer();
     error InvalidFee();
+    error InvalidFeeLevel();
     error InvalidLiquidityAdditionalAmounts();
     error InsufficientLiquidityBurned();
 
@@ -337,46 +340,41 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
     //////////            GETTERS           //////////////
-    function mintFee(bool isReferred, uint16 feeLevelBIPS) public view returns (uint256 mintFee, uint256 refFeeCut) {
-        FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
+    function mintFee(bool isReferred, uint16 feeLevelBIPS) public view returns (uint256 mintFee, uint256 refFeeCut, FeeInfo memory feeInfo) {
+        if (feeLevelBIPS > BIP_DIVISOR) revert InvalidFeeLevel();
+
+        feeInfo = _decodeFeeSlot(_feeInfoSlot);
         if (isReferred) {
             mintFee = feeInfo.mintMaxFee * feeInfo.refMintDiscountBIPS / BIP_DIVISOR;
             refFeeCut = feeInfo.mintMaxFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR;
         }
         else {
             uint256 discount = feeInfo.mintMaxFee * feeInfo.mintMaxDiscountBIPS / BIP_DIVISOR;
-            mintFee = feeInfo.mintMaxFee - discount * uint256(feeLevelBIPS) / BIP_DIVISOR;
+            mintFee = feeInfo.mintMaxFee - (discount * uint256(feeLevelBIPS) / BIP_DIVISOR);
         }
+
     }
-
-    // function collectFeeOption(uint256 id) view external returns (CollectFeeOption collectFeeOption) {
-    //     (, , collectFeeOption,) = _decodeExtraData(_getExtraData(id));
-    // }
-
-
-    // function unlockTime(uint256 id) view external returns (uint256) {
-    //     return uint256(uint40(_getExtraData(id)));
-    // }
 
     //////////            SETTERS             //////////////
     // TODO: if feeINfo is calldata is there any benefits or is it actuall less permoanct since it
     // needs to be copied 
     function setFees(FeeInfo calldata feeInfo) external onlyOwner {
         FeeInfo memory oldFeeInfo = _decodeFeeSlot(_feeInfoSlot);
+        if (feeInfo.mintMaxFee > type(uint144).max) revert();
         if (feeInfo.procotolCollectMinFeeCutBIPS > oldFeeInfo.procotolCollectMinFeeCutBIPS) revert InvalidFee();
-        if (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
         if (feeInfo.refMintFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
         if (feeInfo.refMintDiscountBIPS > BIP_DIVISOR) revert InvalidFee();
         if (feeInfo.refCollectFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
         if (feeInfo.mintMaxDiscountBIPS > BIP_DIVISOR) revert InvalidFee();
+        if (uint256(feeInfo.refCollectFeeCutBIPS) + uint256(feeInfo.procotolCollectMinFeeCutBIPS) > BIP_DIVISOR) revert InvalidFee();
 
         /// @dev inlined what would have been _encodeFeeSlot for smaller bytecode
         _feeInfoSlot = uint256(uint160(feeInfo.mintMaxFee)) |
-               (feeInfo.refMintFeeCutBIPS << 160) |
-               (feeInfo.refCollectFeeCutBIPS << 176) |
-               (feeInfo.refMintDiscountBIPS << 192) |
-               (feeInfo.mintMaxDiscountBIPS << 208) |
-               (feeInfo.procotolCollectMinFeeCutBIPS << 224);
+           (uint256(feeInfo.refMintFeeCutBIPS) << 160) |
+           (uint256(feeInfo.refCollectFeeCutBIPS) << 176) |
+           (uint256(feeInfo.refMintDiscountBIPS) << 192) |
+           (uint256(feeInfo.mintMaxDiscountBIPS) << 208) |
+           (uint256(feeInfo.procotolCollectMinFeeCutBIPS) << 224);
 
     }
 
@@ -439,7 +437,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         bool isReferred = referrer != address(0);
         if (isReferred && !registeredReferrers[referrer]) revert NotRegisteredRefferer();
 
-        (uint256 mintFee, uint256 refMintFeeCut) = mintFee(isReferred, params.feeLevelBIPS);
+        (uint256 mintFee, uint256 refMintFeeCut, ) = mintFee(isReferred, params.feeLevelBIPS);
         uint256 protocolMintFeeCut = mintFee - refMintFeeCut;
         uint96 referrerHash = isReferred ? uint96(uint256(keccak256(abi.encodePacked(referrer, refMintFeeCut)))) : 0;
 

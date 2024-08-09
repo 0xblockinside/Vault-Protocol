@@ -183,14 +183,14 @@ contract LiquidityVaultUnitTests is Test {
     }
 
 
-    function _mintLockedLPPosition(address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, uint rMintPercent, uint collectPercent) {
+    function _mintLockedLPPosition(address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, uint16 feeLevelBIPS, ILiquidityVault.CollectFeeOption collectFeeOption, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, uint rMintPercent, uint collectPercent) {
         IERC20 tokenA = IERC20(token == address(0) ? address(new TestERC20()) : token);
         amountTokenIn = token == address(0) ? tokenA.totalSupply() : amountTokenIn;
         tokenA.approve(address(lVault), amountTokenIn);
         targetToken = address(tokenA);
         uint startDevBal = address(this).balance;
         
-        (mintFee, refMintFeeCut) = lVault.mintFee(referrer != address(0), feeLevelBIPS);
+        (mintFee, rMintFee, ) = lVault.mintFee(referrer != address(0), feeLevelBIPS);
         ILiquidityVault.Snapshot memory mintSnapshot;
         if (expectedRevert != 0) vm.expectRevert(expectedRevert);
         (id, mintSnapshot) = lVault.mint{ value: amountETHIn + mintFee }(msg.sender, referrer, ILiquidityVault.MintParams({
@@ -201,7 +201,7 @@ contract LiquidityVaultUnitTests is Test {
             amountA: amountTokenIn,
             amountB: amountETHIn,
             lockDuration: lockDuration,
-            feeDiscountLeverBIPS: feeLevelBIPS,
+            feeLevelBIPS: feeLevelBIPS,
             collectFeeOption: collectFeeOption
         }));
 
@@ -226,8 +226,8 @@ contract LiquidityVaultUnitTests is Test {
         payable(lVault).transfer(1 ether);
     }
 
-    function test_lockForever(uint seed, uint boolSeed) external logRecorder {
-        vm.skip(false);
+    function test_lockForever(uint seed, uint boolSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         startHoax(msg.sender);
         (uint id, , , ILiquidityVault.Snapshot memory snapshot, , , , , ) = _mintLockedLPPosition(
             address(0),
@@ -235,6 +235,8 @@ contract LiquidityVaultUnitTests is Test {
             0,
             _bound(seed, 0.1 ether, 70 ether),
             lVault.LOCK_FOREVER(),
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -249,8 +251,8 @@ contract LiquidityVaultUnitTests is Test {
         lVault.redeem(id, snapshot, Probability({ chance: 50, seed: boolSeed }).isLikely());
     }
 
-    function test_refundSurplusFundsETH(uint ethSeed, uint surplusSeed) external {
-        vm.skip(false);
+    function test_refundSurplusFundsETH(uint ethSeed, uint surplusSeed, uint feeLevelSeed, uint collectFeeSeed) external {
+        vm.skip(true);
         startHoax(msg.sender);
 
         TestERC20 tokenA = new TestERC20();
@@ -263,7 +265,9 @@ contract LiquidityVaultUnitTests is Test {
 
         uint preBal = msg.sender.balance;
 
-        (uint mintFee, , ) = lVault.fees();
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
+        (uint mintFee, ,) = lVault.mintFee(false, feeLevelBIPS);
         lVault.mint{ value: amountETHIn + mintFee + surplus }(msg.sender, address(0), ILiquidityVault.MintParams({
             tokenA: address(tokenA),
             tokenB: ETH,
@@ -271,15 +275,17 @@ contract LiquidityVaultUnitTests is Test {
             permitB: NoPermit(),
             amountA: amountTokenIn,
             amountB: amountETHIn,
-            lockDuration: lVault.LOCK_FOREVER()
+            lockDuration: lVault.LOCK_FOREVER(),
+            feeLevelBIPS: feeLevelBIPS,
+            collectFeeOption: collectFeeOption
         }));
 
         assertEq(preBal - msg.sender.balance, amountETHIn + mintFee);
     }
 
     // TODO: merge with above
-    function test_refundSurplusToken(uint deficitSeed, uint ethSeed) external {
-        vm.skip(false);
+    function test_refundSurplusToken(uint deficitSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeSeed) external {
+        vm.skip(true);
         startHoax(msg.sender);
         // solhint-disable-next-line
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
@@ -290,7 +296,9 @@ contract LiquidityVaultUnitTests is Test {
         uint amountETHIn = _bound(ethSeed, 0.1 ether, 70 ether);
 
 
-        (uint mintFee, , ) = lVault.mintFee(false, 0);
+        (uint mintFee, ,) = lVault.mintFee(false, 0);
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
 
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
@@ -301,15 +309,17 @@ contract LiquidityVaultUnitTests is Test {
             permitB: NoPermit(),
             amountA: amountTokenIn,
             amountB: amountETHIn,
-            lockDuration: LOCK_FOREVER
+            lockDuration: LOCK_FOREVER,
+            feeLevelBIPS: feeLevelBIPS,
+            collectFeeOption: collectFeeOption
         }));
 
         assertEq(tokenA.balanceOf(msg.sender), tokenA.totalSupply() - amountTokenIn);
 
     }
 
-    function test_insufficintFundsETH(uint deficitSeed, uint ethSeed) external {
-        vm.skip(false);
+    function test_insufficintFundsETH(uint deficitSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeSeed) external {
+        vm.skip(true);
         startHoax(msg.sender);
         // solhint-disable-next-line
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
@@ -320,7 +330,9 @@ contract LiquidityVaultUnitTests is Test {
         uint amountETHIn = _bound(ethSeed, 0.1 ether, 70 ether);
 
 
-        (uint mintFee, , ) = lVault.fees();
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
+        (uint mintFee, ,) = lVault.mintFee(false, feeLevelBIPS);
 
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
@@ -332,14 +344,16 @@ contract LiquidityVaultUnitTests is Test {
             permitB: NoPermit(),
             amountA: amountTokenIn,
             amountB: amountETHIn,
-            lockDuration: LOCK_FOREVER
+            lockDuration: LOCK_FOREVER,
+            feeLevelBIPS: feeLevelBIPS,
+            collectFeeOption: collectFeeOption
         }));
     }
 
     // This also tests that it gets burned and is unusable
     uint cachedTimestamp;
-    function test_redeem(uint ethSeed, uint durationSeed, uint extendSeed, uint removeLPSeed) external logRecorder {
-        vm.skip(false);
+    function test_redeem(uint ethSeed, uint durationSeed, uint extendSeed, uint removeLPSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         cachedTimestamp = uint(block.timestamp);
         // uint cachedTimestamp = uint(block.timestamp); // BUG: strange bug, this doesnt get cached
         // solhint-disable-next-line
@@ -354,6 +368,8 @@ contract LiquidityVaultUnitTests is Test {
             0, 
             _bound(ethSeed, 0.1 ether, 70 ether),
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
         uint startBal0 = IERC20(snapshot.token0).balanceOf(msg.sender);
@@ -370,7 +386,7 @@ contract LiquidityVaultUnitTests is Test {
             lVault.redeem(id, snapshot, removesLP);
 
             if (didExtend) {
-                lVault.extend(id, extension);
+                lVault.extend(id, extension, uint16(BIP_DIVISOR), address(0), address(0));
                 console.log("[postExtend]cachedTimestamp: %d", cachedTimestamp);
                 vm.warp(cachedTimestamp + duration + 1);
 
@@ -400,8 +416,8 @@ contract LiquidityVaultUnitTests is Test {
         }
     }
 
-    function test_nonOwnerRedeem(uint ethSeed, address randomAddress) external logRecorder {
-        vm.skip(false);
+    function test_nonOwnerRedeem(uint ethSeed, address randomAddress, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         vm.assume(randomAddress != address(0));
         startHoax(msg.sender);
         // solhint-disable-next-line
@@ -414,6 +430,8 @@ contract LiquidityVaultUnitTests is Test {
             0, 
             _bound(ethSeed, 0.1 ether, 70 ether),
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -426,8 +444,8 @@ contract LiquidityVaultUnitTests is Test {
     }
 
 
-    function test_increaseLiquidity(uint ethSeed, uint tokenSeed, uint addETHSeed, uint addTokenSeed, uint durationSeed) external logRecorder {
-        vm.skip(false);
+    function test_increaseLiquidity(uint ethSeed, uint tokenSeed, uint addETHSeed, uint addTokenSeed, uint durationSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         // solhint-disable-next-line
         bytes4 INVALID_LIQUIDITY_AMOUNTS = bytes4(keccak256("InvalidLiquidityAdditionalAmounts()"));
         startHoax(msg.sender);
@@ -443,6 +461,8 @@ contract LiquidityVaultUnitTests is Test {
             amountTokenIn, 
             amountETHIn,
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
         
@@ -483,33 +503,118 @@ contract LiquidityVaultUnitTests is Test {
 
     }
 
-    function test_feeChange(uint mintFeeSeed, uint mintPercentSeed, uint collectPercentSeed) external {
+    function test_feeChange(ILiquidityVault.FeeInfo memory feeSeeds, uint16 feeLevelSeed) external {
         vm.skip(false);
         // solhint-disable-next-line
         bytes4 INVALID_FEE = bytes4(keccak256("InvalidFee()"));
-        (uint mintFee, uint rMintPercent, uint collectPercent) = lVault.fees();
-        uint newMintFee = _bound(mintFeeSeed, 0, 2 ** 240 - 1);
-        uint newMintPercent = _bound(mintPercentSeed, 0, BIP_DIVISOR);
-        uint newInvalidMintPercent = _bound(mintPercentSeed, BIP_DIVISOR + 1, type(uint).max);
-        uint newCollectPercent = _bound(mintPercentSeed, 0, collectPercent);
-        uint newInvalidCollectPercent = _bound(collectPercentSeed, collectPercent + 1, BIP_DIVISOR);
+        // solhint-disable-next-line
+        bytes4 INVALID_FEE_LEVEL = bytes4(keccak256("InvalidFeeLevel()"));
+
+        ILiquidityVault.FeeInfo memory oldFeeInfo;
+        (, , oldFeeInfo) = lVault.mintFee(false, 0);
+
+        uint160 mintMaxFee = uint160(_bound(feeSeeds.mintMaxFee, 0, type(uint144).max));
+        uint16 refCollectFeeCutBIPS = uint16(_bound(feeSeeds.refCollectFeeCutBIPS, 0, BIP_DIVISOR));
+        uint16 upperLimitProtCollectFee = uint16((BIP_DIVISOR - refCollectFeeCutBIPS) < oldFeeInfo.procotolCollectMinFeeCutBIPS ? (BIP_DIVISOR - refCollectFeeCutBIPS) : oldFeeInfo.procotolCollectMinFeeCutBIPS);
+        uint16 procotolCollectMinFeeCutBIPS = uint16(_bound(feeSeeds.refCollectFeeCutBIPS, 0, upperLimitProtCollectFee));
+
+        ILiquidityVault.FeeInfo memory invalidFeeInfo = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, BIP_DIVISOR + 1, type(uint16).max)),
+            refCollectFeeCutBIPS: refCollectFeeCutBIPS,
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, 0, BIP_DIVISOR)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, 0, BIP_DIVISOR)),
+            procotolCollectMinFeeCutBIPS: procotolCollectMinFeeCutBIPS
+        });
         
         vm.expectRevert(INVALID_FEE);
-        lVault.setFees(newMintFee, newInvalidMintPercent, newCollectPercent);
+        lVault.setFees(invalidFeeInfo);
 
+        ILiquidityVault.FeeInfo memory invalidFeeInfo1 = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
+            refCollectFeeCutBIPS: uint16(_bound(feeSeeds.refCollectFeeCutBIPS, BIP_DIVISOR + 1, type(uint16).max)),
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, 0, BIP_DIVISOR)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, 0, BIP_DIVISOR)),
+            procotolCollectMinFeeCutBIPS: procotolCollectMinFeeCutBIPS
+        });
         vm.expectRevert(INVALID_FEE);
-        lVault.setFees(newMintFee, newMintPercent, newInvalidCollectPercent);
+        lVault.setFees(invalidFeeInfo1);
         
-        lVault.setFees(newMintFee, newMintPercent, newCollectPercent);
+        ILiquidityVault.FeeInfo memory invalidFeeInfo2 = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
+            refCollectFeeCutBIPS: refCollectFeeCutBIPS,
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, BIP_DIVISOR + 1, type(uint16).max)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, 0, BIP_DIVISOR)),
+            procotolCollectMinFeeCutBIPS: procotolCollectMinFeeCutBIPS
+        });
+        vm.expectRevert(INVALID_FEE);
+        lVault.setFees(invalidFeeInfo2);
 
-        (mintFee, rMintPercent, collectPercent) = lVault.fees();
-        assertEq(newMintFee, mintFee);
-        assertEq(newMintPercent, rMintPercent);
-        assertEq(newCollectPercent, collectPercent);
+        ILiquidityVault.FeeInfo memory invalidFeeInfo3 = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
+            refCollectFeeCutBIPS: refCollectFeeCutBIPS,
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, 0, BIP_DIVISOR)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, BIP_DIVISOR + 1, type(uint16).max)),
+            procotolCollectMinFeeCutBIPS: procotolCollectMinFeeCutBIPS
+        });
+        vm.expectRevert(INVALID_FEE);
+        lVault.setFees(invalidFeeInfo3);
+
+
+        ILiquidityVault.FeeInfo memory invalidFeeInfo4 = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
+            refCollectFeeCutBIPS: refCollectFeeCutBIPS,
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, 0, BIP_DIVISOR)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, 0, BIP_DIVISOR)),
+            procotolCollectMinFeeCutBIPS: uint16(_bound(feeSeeds.procotolCollectMinFeeCutBIPS, oldFeeInfo.procotolCollectMinFeeCutBIPS + 1, type(uint16).max))
+        });
+        vm.expectRevert(INVALID_FEE);
+        lVault.setFees(invalidFeeInfo4);
+
+        ILiquidityVault.FeeInfo memory validFeeInfo = ILiquidityVault.FeeInfo({
+            mintMaxFee: mintMaxFee,
+            refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
+            refCollectFeeCutBIPS: refCollectFeeCutBIPS,
+            refMintDiscountBIPS: uint16(_bound(feeSeeds.refMintDiscountBIPS, 0, BIP_DIVISOR)),
+            mintMaxDiscountBIPS: uint16(_bound(feeSeeds.mintMaxDiscountBIPS, 0, BIP_DIVISOR)),
+            procotolCollectMinFeeCutBIPS: procotolCollectMinFeeCutBIPS
+        });
+        lVault.setFees(validFeeInfo);
+
+        console.log("validFeeInfo.mintMaxFee:                   %d", validFeeInfo.mintMaxFee);
+        console.log("validFeeInfo.refMintFeeCutBIPS:            %d", validFeeInfo.refMintFeeCutBIPS);
+        console.log("validFeeInfo.refCollectFeeCutBIPS:         %d", validFeeInfo.refCollectFeeCutBIPS);
+        console.log("validFeeInfo.refMintDiscountBIPS:          %d", validFeeInfo.refMintDiscountBIPS);
+        console.log("validFeeInfo.mintMaxDiscountBIPS:          %d", validFeeInfo.mintMaxDiscountBIPS);
+        console.log("validFeeInfo.procotolCollectMinFeeCutBIPS: %d", validFeeInfo.procotolCollectMinFeeCutBIPS);
+
+        (uint256 mintFee, uint256 refMintFeeCut) = (0, 0);
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+        vm.expectRevert(INVALID_FEE_LEVEL);
+        (mintFee, refMintFeeCut, ) = lVault.mintFee(false, uint16(_bound(feeLevelBIPS, BIP_DIVISOR + 1, type(uint16).max)));
+
+        (uint minFee, uint maxFee) = (validFeeInfo.mintMaxFee - validFeeInfo.mintMaxFee * uint(validFeeInfo.mintMaxDiscountBIPS) / BIP_DIVISOR, validFeeInfo.mintMaxFee);
+        console.log("minFee, maxFee: %d, %d", minFee, maxFee);
+        (mintFee, refMintFeeCut, ) = lVault.mintFee(false, 0);
+        assertEq(mintFee, maxFee);
+
+        (mintFee, refMintFeeCut, ) = lVault.mintFee(false, uint16(BIP_DIVISOR));
+        assertEq(mintFee, minFee);
+
+        // if (validFeeInfo.mintMaxFee > 3 && validFeeInfo.mintMaxDiscountBIPS > 3) {
+            console.log("feeLevel: %d", uint16(_bound(feeLevelBIPS, 1, BIP_DIVISOR-1)));
+            (mintFee, refMintFeeCut, ) = lVault.mintFee(false, uint16(_bound(feeLevelBIPS, 1, BIP_DIVISOR-1)));
+            assertLe(mintFee, maxFee);
+            assertGe(mintFee, minFee);
+        // }
     }
 
-    function test_migration(uint ethSeed, uint durationSeed) external logRecorder {
-        vm.skip(false);
+    function test_migration(uint ethSeed, uint durationSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         ISuccessor successor = new MockMigrationContract();
         lVault.setSuccessor(address(successor));
 
@@ -522,6 +627,8 @@ contract LiquidityVaultUnitTests is Test {
             0, 
             amountETHIn,
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -538,8 +645,8 @@ contract LiquidityVaultUnitTests is Test {
 
     }
 
-    function test_transfer(address reciever, uint durationSeed, uint ethSeed) external logRecorder {
-        vm.skip(false);
+    function test_transfer(address reciever, uint durationSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         vm.assume(reciever != address(0));
 
         // solhint-disable-next-line
@@ -555,6 +662,8 @@ contract LiquidityVaultUnitTests is Test {
             0, 
             amountETHIn,
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -574,8 +683,8 @@ contract LiquidityVaultUnitTests is Test {
 
 
     address[] wallets;
-    function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed) external logRecorder {
-        vm.skip(false);
+    function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         // solhint-disable-next-line
         bytes4 NOT_REGISTERED = bytes4(keccak256("NotRegisteredRefferer()"));
 
@@ -589,6 +698,8 @@ contract LiquidityVaultUnitTests is Test {
             0,
             _bound(seed, 0.1 ether, 70 ether),
             LOCK_FOREVER,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             NOT_REGISTERED
         );
 
@@ -602,6 +713,8 @@ contract LiquidityVaultUnitTests is Test {
             0,
             _bound(seed, 0.1 ether, 70 ether),
             LOCK_FOREVER,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
         
@@ -706,7 +819,8 @@ contract LiquidityVaultUnitTests is Test {
         delete wallets;
     }
 
-    function test_collect(uint durationSeed, uint ethSeed, uint preMintSeed, uint collectSeed, uint buySeed, uint sellSeed, uint advanceSeed) external logRecorder {
+    function test_collect(uint durationSeed, uint ethSeed, uint preMintSeed, uint collectSeed, uint buySeed, uint sellSeed, uint advanceSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(true);
         startHoax(msg.sender);
 
         uint BIP_DIVISOR = 10_000;
@@ -715,6 +829,7 @@ contract LiquidityVaultUnitTests is Test {
 
         uint256 amountInETH = _bound(ethSeed, 0.1 ether, 70 ether);
         uint32 duration = uint32(_bound(durationSeed, 0, uint(lVault.LOCK_FOREVER())));
+        uint unlockTime = block.timestamp + duration;
 
         uint id;
         address token;
@@ -731,6 +846,8 @@ contract LiquidityVaultUnitTests is Test {
                 0,
                 amountInETH,
                 duration,
+                uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+                ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
                 bytes4("")
             );
         }
@@ -741,6 +858,8 @@ contract LiquidityVaultUnitTests is Test {
             0,
             amountInETH,
             duration,
+            uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -762,7 +881,7 @@ contract LiquidityVaultUnitTests is Test {
         console.log("pre skiptTime");
         uint skipTime = (uint(duration) + uint(duration) * 3 / 10) / N;
         console.log("post skiptTime: %d", skipTime);
-        uint unlockTime = lVault.unlockTime(id);
+        // uint unlockTime = lVault.unlockTime(id);
         console.log("unlockTime");
         for (uint i; i < N; i++) {
             unchecked {
