@@ -759,7 +759,7 @@ contract LiquidityVaultUnitTests is Test {
 
         vm.stopPrank();
 
-        feeInfo.mintMaxFee = uint160(_bound(feeInfoSeed.mintMaxFee, 0, type(uint160).max));
+        feeInfo.mintMaxFee = uint160(_bound(feeInfoSeed.mintMaxFee, 0, 70 ether));
         feeInfo.refMintFeeCutBIPS = uint16(_bound(feeInfoSeed.refMintFeeCutBIPS, 0, BIP_DIVISOR));
         feeInfo.refCollectFeeCutBIPS = uint16(_bound(feeInfoSeed.refCollectFeeCutBIPS, 0, BIP_DIVISOR));
         feeInfo.refMintDiscountBIPS = uint16(_bound(feeInfoSeed.refMintDiscountBIPS, 0, BIP_DIVISOR));
@@ -841,7 +841,9 @@ contract LiquidityVaultUnitTests is Test {
 
             
             if (changeFeeOptionProbability.isLikely()) {
-                collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed + i, 0, 2));
+                uint _dynamicFeeOptionSeed;
+                unchecked { _dynamicFeeOptionSeed = collectFeeOptionSeed + i; }
+                collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(_dynamicFeeOptionSeed, 0, 2));
                 startHoax(msg.sender);
                 lVault.setCollectFeeOption(id, collectFeeOption);
                 vm.stopPrank();

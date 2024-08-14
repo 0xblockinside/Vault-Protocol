@@ -590,9 +590,11 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         // Update the Payout Merkle root
         if (referralHash != 0) {
-            uint16 cutFeeBIPS = feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS;
-            fees.referralCut0 = fees.cut0 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
-            fees.referralCut1 = fees.cut1 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
+            if (feeInfo.refCollectFeeCutBIPS > 0) {
+                uint16 cutFeeBIPS = feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS;
+                fees.referralCut0 = fees.cut0 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
+                fees.referralCut1 = fees.cut1 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
+            }
             referralHash = uint96(uint256(keccak256(abi.encodePacked(
                 uint96(uint256(keccak256(abi.encodePacked(referralHash, fees.referralCut0)))),
                 fees.referralCut1
