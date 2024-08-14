@@ -63,7 +63,7 @@ contract LiquidityVaultPayMaster is IPayMaster {
     }
 
     function claimReferralFees(ClaimParams[] calldata params) external {
-        ILiquidityVaultReferral _lpVault = lpVault; // Cached for gas savings
+        ILiquidityVaultReferral _lpVault = lpVault; /// @dev Cached for gas savings
         address WETH = _lpVault.WETH();
 
         if (address(_lpVault) == address(0)) revert LPVaultNotSet();
@@ -90,10 +90,10 @@ contract LiquidityVaultPayMaster is IPayMaster {
             if (proof != referralHash) revert FeeProofInvalid();
 
             // Send Owed Fees Tokens/ETH
-            if (params[i].snapshot.token0 == WETH) payable(params[i].referrer).transfer(totalFee0 + params[i].mintFee);
-            else SafeTransferLib.safeTransfer(params[i].snapshot.token0, params[i].referrer, totalFee0);
-            if (params[i].snapshot.token1 == WETH) payable(params[i].referrer).transfer(totalFee1 + params[i].mintFee);
-            else SafeTransferLib.safeTransfer(params[i].snapshot.token1, params[i].referrer, totalFee1);
+            if (params[i].snapshot.token0 == WETH && (totalFee0 + params[i].mintFee) > 0) payable(params[i].referrer).transfer(totalFee0 + params[i].mintFee);
+            else if (totalFee0 > 0) SafeTransferLib.safeTransfer(params[i].snapshot.token0, params[i].referrer, totalFee0);
+            if (params[i].snapshot.token1 == WETH && (totalFee1 + params[i].mintFee) > 0) payable(params[i].referrer).transfer(totalFee1 + params[i].mintFee);
+            else if (totalFee1 > 0) SafeTransferLib.safeTransfer(params[i].snapshot.token1, params[i].referrer, totalFee1);
 
             // If neither tokens were WETH then we still own the referrer the mint fee in WETH
             if (params[i].snapshot.token0 != WETH && params[i].snapshot.token1 != WETH) payable(params[i].referrer).transfer(params[i].mintFee);
