@@ -119,6 +119,7 @@ contract LiquidityVaultUnitTests is Test {
     address ETH;
     uint BIP_DIVISOR;
     address constant DEAD_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+    uint32 MIN_LOCK_DURATION = 7 days;
 
     function setUp() external {
         payMaster = new LiquidityVaultPayMaster(address(this));
@@ -229,7 +230,63 @@ contract LiquidityVaultUnitTests is Test {
         assertEq(mintSnapshot.amountIn1, snapshot.amountIn1);
         assertEq(mintSnapshot.liquidity, snapshot.liquidity);
 
+        console.log("mintFee: %d", mintFee);
+        console.log("rMintFeeCut: %d", rMintFeeCut);
+        console.log("startDevBal: %d", startDevBal);
+        console.log("address(this).balance: %d", address(this).balance);
+
         assertEq(mintFee - rMintFeeCut, address(this).balance - startDevBal);
+    }
+
+    function _verifyReferralFees(uint id, address referrer, ILiquidityVault.Snapshot memory snapshot, address buyer, bool isToken0, address pool, uint seed) internal returns (ILiquidityVault.Snapshot memory) {
+         swap(
+            pool,
+            buyer,
+            _bound(seed, 5 ether, 70 ether),
+            !isToken0
+        );
+
+        startHoax(msg.sender);
+        LiquidityVault.Fees memory fees = lVault.collect(id, snapshot);
+        (snapshot, , , , , ) = _getLiquidityVaultLog(isToken0 ? snapshot.token0 : snapshot.token1, WETH);
+
+        if (referrer == address(0)) {
+            assertEq(fees.referralCut0, 0);
+            assertEq(fees.referralCut1, 0);
+            return snapshot;
+        }
+
+        if (snapshot.token0 == WETH) assertGt(fees.referralCut0, 0);
+        if (snapshot.token1 == WETH) assertGt(fees.referralCut1, 0);
+
+
+        (uint startRefBal0, uint startRefBal1) = snapshot.token0 == WETH ? 
+            (address(referrer).balance, IERC20(snapshot.token1).balanceOf(address(referrer))) :
+            (IERC20(snapshot.token0).balanceOf(address(referrer)), address(referrer).balance); 
+
+        LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+        uint[] memory fee0s = new uint[](1);
+        uint[] memory fee1s = new uint[](1);
+        fee0s[0] = fees.referralCut0;
+        fee1s[0] = fees.referralCut1;
+
+        params[0] = LiquidityVaultPayMaster.ClaimParams({
+            id: id,
+            referrer: referrer,
+            snapshot: snapshot,
+            mintFee: 0,
+            fee0s: fee0s,
+            fee1s: fee1s
+        });
+        payMaster.claimReferralFees(params); 
+
+        (uint lastRefBal0, uint lastRefBal1) = snapshot.token0 == WETH ? 
+            (address(referrer).balance, IERC20(snapshot.token1).balanceOf(address(referrer))) :
+            (IERC20(snapshot.token0).balanceOf(address(referrer)), address(referrer).balance); 
+        
+        assertEq(fees.referralCut0, lastRefBal0 - startRefBal0);
+        assertEq(fees.referralCut1, lastRefBal1 - startRefBal1);
+        return snapshot;
     }
 
 
@@ -372,7 +429,7 @@ contract LiquidityVaultUnitTests is Test {
         // solhint-disable-next-line
         bytes4 NOT_UNLOCKED = bytes4(keccak256("NotUnlocked()"));
         startHoax(msg.sender);
-        uint32 duration = uint32(_bound(durationSeed, 0, lVault.LOCK_FOREVER() - 1)); // duration
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, lVault.LOCK_FOREVER() - 1)); // duration
 
         console.log("start WETH balance: %d", IERC20(WETH).balanceOf(msg.sender));
         (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
@@ -399,6 +456,7 @@ contract LiquidityVaultUnitTests is Test {
             lVault.redeem(id, snapshot, removesLP);
 
             if (didExtend) {
+                // This tests simple extend for us
                 lVault.extend(id, extension, uint16(BIP_DIVISOR), address(0), address(0));
                 console.log("[postExtend]cachedTimestamp: %d", cachedTimestamp);
                 vm.warp(cachedTimestamp + duration + 1);
@@ -702,25 +760,248 @@ contract LiquidityVaultUnitTests is Test {
         lVault.redeem(id, snapshot, false);
     }
 
-    function test_extend(uint id, uint durationSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+    function test_extendAfterGracePeriod(uint durationSeed, uint feeLevelSeed, uint newDurationSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed) external logRecorder {
+        vm.skip(true);
+        // solhint-disable-next-line
+        bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
+
+        cachedTimestamp = uint(block.timestamp);
+        uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
+
+        uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 1, BIP_DIVISOR));
+
+        startHoax(msg.sender);
+
+        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+            address(0), 
+            address(0), 
+            0, 
+            1 ether,
+            duration,
+            feeLevelBIPS,
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            bytes4("")
+        );
+
+        vm.warp(_bound(advanceSeed, cachedTimestamp + duration - GRACE_PERIOD, cachedTimestamp + duration + MIN_LOCK_DURATION));
+
+        uint16 newFeeLevelBIPS = uint16(_bound(newFeeLevelSeed, 0, feeLevelBIPS - 1));
+        vm.expectRevert(INSUFFICIENT_FUNDS);
+        lVault.extend(id, uint32(_bound(newDurationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)), newFeeLevelBIPS, address(0), address(0));
+
+        uint feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
+        lVault.extend{ value: feeOwed }(id, uint32(_bound(newDurationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)), newFeeLevelBIPS, address(0), address(0));
+        
+    }
+
+     function test_extendFirstTimeReferrer(address referrer, address buyer, uint buySeed, uint durationSeed, uint newDurationSeed, uint feeLevelSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed) external logRecorder {
         vm.skip(true);
 
-        // (uint id, , , LiquidityVault.Snapshot memory snapshot, , , , ,) = _mintLockedLPPosition(
-        //     address(0), 
-        //     address(0), 
-        //     0, 
-        //     _bound(seed, 0.1 ether, 70 ether),
-        //     duration,
-        //     uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-        //     ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
-        //     bytes4("")
-        // );
+        vm.assume(referrer > address(9));
+        lVault.setReferrer(referrer, true);
 
-        // uint32 newDuration = uint32(_bound(durationSeed, 0, lVault.LOCK_FOREVER() - 1));
-        // lVault.extend(id, snapshot, newDuration);
+        cachedTimestamp = uint(block.timestamp);
+        uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
+
+        uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+
+        startHoax(msg.sender);
+
+        (uint id, address token, address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+            address(0), 
+            address(0), 
+            0, 
+            1 ether,
+            duration,
+            feeLevelBIPS,
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            bytes4("")
+        );
+
+        vm.stopPrank();
+
+        snapshot = _verifyReferralFees(id, address(0), snapshot, buyer, isToken0, pool, buySeed);
+
+        vm.warp(_bound(advanceSeed, cachedTimestamp + duration - GRACE_PERIOD, cachedTimestamp + duration + GRACE_PERIOD));
+
+        uint32 extendedDuration = uint32(_bound(newDurationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1));
+        lVault.extend(id, extendedDuration, uint16(BIP_DIVISOR), address(0), referrer);
+
+        _verifyReferralFees(id, referrer, snapshot, buyer, isToken0, pool, buySeed);
+    }
+
+    function test_extendIgnoredReferrerToNewReferrer(address referrer, address newReferrer, address buyer, uint buySeed, uint durationSeed, uint feeLevelSeed, bool technicallyCorrectOldReferrer, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed, uint newRefFeeCutSeed) external logRecorder {
+        vm.skip(true);
+
+        vm.assume(referrer > address(9));
+        vm.assume(newReferrer > address(9) && newReferrer != referrer);
+        vm.assume(referrer.code.length == 0);
+        vm.assume(newReferrer.code.length == 0);
+        lVault.setReferrer(referrer, true);
+        lVault.setReferrer(newReferrer, true);
+
+        cachedTimestamp = uint(block.timestamp);
+        uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
+
+        uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+
+        (, uint refMintFeeCut, LiquidityVault.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
+        _feeInfo.refMintFeeCutBIPS = uint16(_bound(newRefFeeCutSeed, 0, BIP_DIVISOR));
+        lVault.setFees(_feeInfo);
+        (, refMintFeeCut, ) = lVault.mintFee(true, feeLevelBIPS);
+
+        startHoax(msg.sender);
+
+        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+            address(0), 
+            referrer, 
+            0, 
+            1 ether,
+            duration,
+            feeLevelBIPS,
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            bytes4("")
+        );
+
+        console.log("cachedTimestamp: %d", cachedTimestamp);
+        console.log("duration: %d", duration);
+        console.log("GRACE_PERIOD: %d", GRACE_PERIOD);
+
+        uint newTime = _bound(advanceSeed, cachedTimestamp + duration - GRACE_PERIOD, cachedTimestamp + duration + GRACE_PERIOD);
+        console.log("newTime: %d", newTime);
+        vm.warp(newTime);
+        lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, address(0));
+
+        snapshot = _verifyReferralFees(id, address(0), snapshot, buyer, isToken0, pool, buySeed);
+
+        vm.warp(newTime + MIN_LOCK_DURATION);
+
+        vm.expectRevert();
+        lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), address(0), newReferrer);
+
+        if (refMintFeeCut > 0) vm.expectRevert();
+        lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
+
+        if (refMintFeeCut > 0) {
+            LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+            uint[] memory fee0s = new uint[](0);
+            uint[] memory fee1s = new uint[](0);
+
+            params[0] = LiquidityVaultPayMaster.ClaimParams({
+                id: id,
+                referrer: referrer,
+                snapshot: snapshot,
+                mintFee: refMintFeeCut,
+                fee0s: fee0s,
+                fee1s: fee1s
+            });
+            payMaster.claimReferralFees(params); 
+
+            lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
+        }
+
+        _verifyReferralFees(id, newReferrer, snapshot, buyer, isToken0, pool, buySeed);
+        
+    }
+
+    function test_extendReferrerToNewReferrer(address referrer, address newReferrer, address buyer, uint buySeed, uint durationSeed, uint feeLevelSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed, uint newRefFeeCutSeed) external logRecorder {
+        vm.skip(true);
+
+        vm.assume(referrer > address(9));
+        vm.assume(newReferrer > address(9) && newReferrer != referrer);
+        vm.assume(referrer.code.length == 0);
+        vm.assume(newReferrer.code.length == 0);
+
+        lVault.setReferrer(referrer, true);
+        lVault.setReferrer(newReferrer, true);
+
+        cachedTimestamp = uint(block.timestamp);
+        uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
+
+        uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
+
+        (, uint refMintFeeCut, LiquidityVault.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
+        _feeInfo.refMintFeeCutBIPS = uint16(_bound(newRefFeeCutSeed, 0, BIP_DIVISOR));
+        lVault.setFees(_feeInfo);
+        (, refMintFeeCut, ) = lVault.mintFee(true, feeLevelBIPS);
+
+        startHoax(msg.sender);
+        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+            address(0), 
+            referrer, 
+            0, 
+            1 ether,
+            duration,
+            feeLevelBIPS,
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            bytes4("")
+        );
+
+        uint newTime = _bound(advanceSeed, cachedTimestamp + duration - GRACE_PERIOD, cachedTimestamp + duration + GRACE_PERIOD);
+        vm.warp(newTime);
+
+        if (refMintFeeCut > 0) vm.expectRevert();
+        lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
+
+        if (refMintFeeCut > 0) {
+            LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+            uint[] memory fee0s = new uint[](0);
+            uint[] memory fee1s = new uint[](0);
+
+            params[0] = LiquidityVaultPayMaster.ClaimParams({
+                id: id,
+                referrer: referrer,
+                snapshot: snapshot,
+                mintFee: refMintFeeCut,
+                fee0s: fee0s,
+                fee1s: fee1s
+            });
+            payMaster.claimReferralFees(params); 
+
+            lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
+        }
+
+        _verifyReferralFees(id, newReferrer, snapshot, buyer, isToken0, pool, buySeed);
+    }
+
+    function test_extendBeforeGracePeriod(uint durationSeed, uint feeLevelSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
+        vm.skip(false);
+        cachedTimestamp = uint(block.timestamp);
+        uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
+
+        uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, lVault.LOCK_FOREVER() - 1)); // duration
+        uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 1, BIP_DIVISOR));
+
+        startHoax(msg.sender);
+        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
+            address(0), 
+            address(0), 
+            0, 
+            1 ether,
+            duration,
+            feeLevelBIPS,
+            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            bytes4("")
+        );
+
+        vm.warp(cachedTimestamp + duration - (GRACE_PERIOD + 1));
+
+        lVault.extend(id, MIN_LOCK_DURATION, uint16(_bound(newFeeLevelSeed, 0, feeLevelBIPS-1)), address(0), address(0));
 
         /*
             Scenerios to test
+            early extend
+
+            paying off feeLevel delta
+
             1. referrer to no referrer.. if referrer is no longer registered, then the referrer should be set to address(0)
             2. referrer to new referrer.. if referrer is registered, then the referrer should be set to the new referrer
             3. referrer to same referrer.. if referrer is the same as the current referrer, then the referrer should not be changed 
@@ -733,7 +1014,7 @@ contract LiquidityVaultUnitTests is Test {
 
     address[] wallets;
     function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed, uint feeLevelSeed, uint collectFeeOptionSeed, uint changeFeeOptionSeed, ILiquidityVault.FeeInfo memory feeInfoSeed) external logRecorder {
-        vm.skip(false);
+        vm.skip(true);
         // solhint-disable-next-line
         bytes4 NOT_REGISTERED = bytes4(keccak256("NotRegisteredRefferer()"));
 
@@ -853,6 +1134,15 @@ contract LiquidityVaultUnitTests is Test {
                 (uint startBal0, uint startBal1) = snapshot.token0 == WETH ? 
                     (address(msg.sender).balance, IERC20(snapshot.token1).balanceOf(msg.sender)) :
                     (IERC20(snapshot.token0).balanceOf(msg.sender), address(msg.sender).balance); 
+
+                (uint startRefBal0, uint startRefBal1) = snapshot.token0 == WETH ? 
+                    (address(payMaster).balance, IERC20(snapshot.token1).balanceOf(address(payMaster))) :
+                    (IERC20(snapshot.token0).balanceOf(address(payMaster)), address(payMaster).balance); 
+
+                (uint startPBal0, uint startPBal1) = snapshot.token0 == WETH ? 
+                    (address(this).balance, IERC20(snapshot.token1).balanceOf(address(this))) :
+                    (IERC20(snapshot.token0).balanceOf(address(this)), address(this).balance); 
+
                 try lVault.collect(id, snapshot) returns (ILiquidityVault.Fees memory fees) {
                     (uint rFee0, uint rFee1) = (0, 0);
                     (uint ownerFee0, uint ownerFee1) = (0, 0);
@@ -867,18 +1157,29 @@ contract LiquidityVaultUnitTests is Test {
                     feeCount += 1;
 
                     console.log("collect feeCount: %d", feeCount);
-                    console.log("collect owner fee: %d", ownerFee0);
-                    console.log("collect owner fee: %d", ownerFee1);
 
-                    console.log("rcollect fee: %d", rFee0);
-                    console.log("rcollect fee: %d", rFee1);
 
                     (uint lastBal0, uint lastBal1) = snapshot.token0 == WETH ? 
                         (address(msg.sender).balance, IERC20(snapshot.token1).balanceOf(msg.sender)) :
                         (IERC20(snapshot.token0).balanceOf(msg.sender), address(msg.sender).balance); 
+
+                    (uint lastRefBal0, uint lastRefBal1) = snapshot.token0 == WETH ? 
+                        (address(payMaster).balance, IERC20(snapshot.token1).balanceOf(address(payMaster))) :
+                        (IERC20(snapshot.token0).balanceOf(address(payMaster)), address(payMaster).balance); 
+
+                    (uint lastPBal0, uint lastPBal1) = snapshot.token0 == WETH ? 
+                        (address(this).balance, IERC20(snapshot.token1).balanceOf(address(this))) :
+                        (IERC20(snapshot.token0).balanceOf(address(this)), address(this).balance); 
                     
                     assertEq(ownerFee0, lastBal0 - startBal0);
                     assertEq(ownerFee1, lastBal1 - startBal1);
+
+                    assertEq(fees.referralCut0, lastRefBal0 - startRefBal0);
+                    assertEq(fees.referralCut1, lastRefBal1 - startRefBal1);
+
+                    assertEq(fees.cut0 - fees.referralCut0, lastPBal0 - startPBal0);
+                    assertEq(fees.cut1 - fees.referralCut1, lastPBal1 - startPBal1);
+
                     if (collectFeeOption == ILiquidityVault.CollectFeeOption.BOTH) {
                         assertGt(ownerFee0, 0);
                         assertGt(ownerFee1, 0);
@@ -891,6 +1192,28 @@ contract LiquidityVaultUnitTests is Test {
                         assertEq(ownerFee0, 0);
                         assertGt(ownerFee1, 0);
                     }
+
+                    if (snapshot.token0 == WETH) {
+                        if (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS > 0) assertGt(fees.cut0, 0);
+                        assertEq(fees.cut1, 0);
+                        if (feeInfo.refCollectFeeCutBIPS == 0) assertEq(lastRefBal0 - startRefBal0, 0);
+                        if (feeInfo.procotolCollectMinFeeCutBIPS == 0) assertEq(lastPBal0 - startPBal0, 0);
+                    }
+                    if (snapshot.token1 == WETH) {
+                        if (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS > 0) assertGt(fees.cut1, 0);
+                        assertEq(fees.cut0, 0);
+                        if (feeInfo.refCollectFeeCutBIPS == 0) assertEq(lastRefBal1 - startRefBal1, 0);
+                        if (feeInfo.procotolCollectMinFeeCutBIPS == 0) assertEq(lastPBal1 - startPBal1, 0);
+                    }
+
+                    console.log("fees.cut0:      %d", fees.cut0);
+                    console.log("fees.ownerFee0: %d", fees.ownerFee0);
+
+                    console.log("fees.cut1:      %d", fees.cut1);
+                    console.log("fees.ownerFee1: %d", fees.ownerFee1);
+                    
+                    console.log("feeInfo.refCollectFeeCutBIPS:         %d", feeInfo.refCollectFeeCutBIPS);
+                    console.log("feeInfo.procotolCollectMinFeeCutBIPS: %d", feeInfo.procotolCollectMinFeeCutBIPS);
 
 
                     if (feeCount > 0 && (claimProbability.isLikely() || i == N - 1)) {

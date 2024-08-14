@@ -66,6 +66,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address public constant ETH = address(0);
     uint32 public constant LOCK_FOREVER = type(uint32).max;
+    uint32 constant MIN_LOCK_DURATION = 7 days;
     uint40 constant LOCKED_FOREVER = type(uint40).max;
     uint16 public constant BIP_DIVISOR = 10_000;
     IPayMaster immutable payMaster;
@@ -85,6 +86,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     error InvalidFeeLevel();
     error InvalidLiquidityAdditionalAmounts();
     error InsufficientLiquidityBurned();
+    error InvalidLockDuration();
 
     function name() public pure override returns (string memory) { return "Liquidity Vault"; }
     function symbol() public pure override returns (string memory) { return "LPVault"; }
@@ -118,7 +120,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /// Bits Layout of 'hashInfoForCertificateID.slot':
     /// - [0..159]     160 bits  `snapshotHash: keccak256(abi.encodePacked(token0, token1, snapshotIn0, snapshotIn1, liquidity))`
     /// - [160..256]    96 bits  `referralHash`
-    mapping(uint256 => bytes32) /*public*/ hashInfoForCertificateID;
+    mapping(uint256 => bytes32) hashInfoForCertificateID;
 
     mapping(address => bool) public registeredReferrers;
 
@@ -427,6 +429,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         bool isReferred = referrer != address(0);
         if (isReferred && !registeredReferrers[referrer]) revert NotRegisteredRefferer();
 
+        if (params.lockDuration < MIN_LOCK_DURATION) revert InvalidLockDuration();
         (uint256 mintFee, uint256 refMintFeeCut, ) = mintFee(isReferred, params.feeLevelBIPS);
         uint256 protocolMintFeeCut = mintFee - refMintFeeCut;
         uint96 referrerHash = isReferred ? uint96(uint256(keccak256(abi.encodePacked(referrer, refMintFeeCut)))) : 0;
@@ -532,7 +535,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         /// @section Fee Breakdown
         FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
-        // (uint256 cut0, uint256 cut1) = (0, 0);
 
         if (referralHash != 0 && !ignoreReferrer) (fees.cut0, fees.cut1) = (
             fees.ownerFee0 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR, 
@@ -589,7 +591,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
 
         // Update the Payout Merkle root
-        if (referralHash != 0) {
+        if (referralHash != 0 && !ignoreReferrer) {
             if (feeInfo.refCollectFeeCutBIPS > 0) {
                 uint16 cutFeeBIPS = feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS;
                 fees.referralCut0 = fees.cut0 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
@@ -624,8 +626,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             liquidity,
             amountIn0,
             amountIn1,
-            referralHash != 0 ? abi.encode(fees.referralCut0) : bytes(""),
-            referralHash != 0 ? abi.encode(fees.referralCut1) : bytes("")
+            fees.referralCut0 > 0 ? abi.encode(fees.referralCut0) : bytes(""),
+            fees.referralCut1 > 0 ? abi.encode(fees.referralCut1) : bytes("")
         );
     }
 
@@ -645,9 +647,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         verifySnapshot(id, snapshot);
         (uint96 extraData, address owner) = _getAndValidateCertificateInfo(id);
         (uint40 unlockTime, , ,) = _decodeExtraData(extraData);
-        console.log("[redeem]: block.timestamp: %d", block.timestamp);
-        console.log("[redeem]: extraData: %d", extraData);
-        console.log("[redeem]: unlock time: %d", unlockTime);
+
         if (unlockTime == LOCKED_FOREVER || block.timestamp <= unlockTime) revert NotUnlocked();
 
         address pool = _pairFor(snapshot.token0, snapshot.token1);
@@ -667,18 +667,18 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external {
         // If you have served part of your lock you should be able to collect fee lever
         // or perhaps at least get rid of your referrer
-        uint256 graceBuffer = 2 days;
+        if (additionalTime < MIN_LOCK_DURATION) revert InvalidLockDuration();
 
         (uint96 extraData, ) = _getAndValidateCertificateInfo(id);
         (uint40 unlockTime, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) = _decodeExtraData(extraData);
-        if (unlockTime == LOCKED_FOREVER) return;
+        if (unlockTime == LOCKED_FOREVER) revert(); /// @dev: already locked forever
 
-        if (block.timestamp > uint256(unlockTime) || (unlockTime - block.timestamp) <= graceBuffer) {
+        bool simpleExtend = newFeeLevelBIPS > feeLevelBIPS && oldReferrer == address(0) && referrer == address(0);
+
+        if (!simpleExtend && (block.timestamp > uint256(unlockTime) || (unlockTime - block.timestamp) <= (MIN_LOCK_DURATION * 4 / 10))) {
             (uint160 snapshotHash, uint96 referralHash) = _decodeHashInfo(hashInfoForCertificateID[id]);
-            bool hadReferrer = referralHash != 0;
+            bool hadReferrer = referralHash != 0;// && !ignoreReferrer;
             bool wantsReferrer = referrer != address(0);
-
-            uint256 refundETH;
 
             console.log("extend->newFeeLevelBIPS: %d", newFeeLevelBIPS);
             console.log("extend->feeLevelBIPS:    %d", feeLevelBIPS);
@@ -686,20 +686,22 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             if (newFeeLevelBIPS < feeLevelBIPS) {
                 FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
                 uint256 feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
-                refundETH = _validateFunds(feeOwed, 0);
-
                 console.log("extend pay for more unlock fees:    %d", feeOwed);
+                uint256 refundETH = _validateFunds(feeOwed, 0);
+
 
                 // Pay Fee
                 payMaster.payFees{ value: feeOwed }(feeOwed);
 
                 feeLevelBIPS = newFeeLevelBIPS;
+                if (refundETH > 0) payable(msg.sender).transfer(refundETH);
             }
             if (wantsReferrer) {
                 console.log("extend wants referrer on new term");
+                if (!registeredReferrers[referrer]) revert NotRegisteredRefferer();
                 if (hadReferrer) {
                     uint96 zeroedReferrerHash = uint96(uint256(keccak256(abi.encodePacked(oldReferrer, uint256(0)))));
-                    /// @dev: Old referrer account must be zeroed
+                    /// @dev: Old referrer account must be zeroed b4 you can extend with new referrer
                     if (referralHash != zeroedReferrerHash) revert();
                 }
                 _resetReferralHash(id, referrer, snapshotHash);    
@@ -713,7 +715,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             }
         }
         
-        if (additionalTime == LOCK_FOREVER || LOCKED_FOREVER - unlockTime <= additionalTime) unlockTime = LOCKED_FOREVER;
+        if (additionalTime == LOCK_FOREVER || additionalTime >= (LOCKED_FOREVER - unlockTime)) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
 
         console.log("block.timestamp: %d", block.timestamp);
