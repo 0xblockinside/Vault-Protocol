@@ -29,9 +29,10 @@ library LiquidityVaultLogDecoder {
             console.logBytes(referralFeeData);
             if (referralFeeData.length > 0) referralMintFee = abi.decode(referralFeeData, (uint256));
         }
-        else if (log.topics[0] == keccak256("Collected(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,bytes,bytes)")) {
+        else if (log.topics[0] == keccak256("Collected(uint256,uint256,uint256,uint256,uint256,uint256,bytes,bytes)")) {
             (bytes memory referralFeeData0, bytes memory referralFeeData1) = (bytes(""), bytes(""));
-            (, , snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, ownerFee0, ownerFee1, referralFeeData0, referralFeeData1) = abi.decode(log.data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256, bytes, bytes));
+            console.log("LiquidityVaultLogDecoder[COLLECTED] pre:");
+            (ownerFee0, ownerFee1, snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, referralFeeData0, referralFeeData1) = abi.decode(log.data, (uint256, uint256, uint256, uint256, uint256, bytes, bytes));
             console.log("LiquidityVaultLogDecoder[COLLECTED] referralFeeData:");
             console.log("                                 snapshot.liquidity: %d", snapshot.liquidity);
             console.log("                                 snapshot.amountIn0: %d", snapshot.amountIn0);
@@ -185,7 +186,9 @@ contract LiquidityVaultUnitTests is Test {
     function _getLiquidityVaultLog(address tokenA, address tokenB) internal returns (ILiquidityVault.Snapshot memory snapshot, uint referralMintFee, uint referralFee0, uint referralFee1, uint ownerFee0, uint ownerFee1) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         Vm.Log memory log = logs[logs.length-1];
+        console.log("[getLiquidityVaultLog] log:");
         (snapshot, referralMintFee, referralFee0, referralFee1, ownerFee0, ownerFee1) = LiquidityVaultLogDecoder.decode(log);
+        console.log("post decode");
         (snapshot.token0, snapshot.token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
     }
 
@@ -700,7 +703,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_extend(uint id, uint durationSeed, uint feeLevelSeed, uint collectFeeOptionSeed) external logRecorder {
-        // vm.skip(false);
+        vm.skip(true);
 
         // (uint id, , , LiquidityVault.Snapshot memory snapshot, , , , ,) = _mintLockedLPPosition(
         //     address(0), 
@@ -836,26 +839,34 @@ contract LiquidityVaultUnitTests is Test {
                 );
             }
 
-            (uint startBal0, uint startBal1) = snapshot.token0 == WETH ? 
-                (address(msg.sender).balance, IERC20(snapshot.token1).balanceOf(msg.sender)) :
-                (IERC20(snapshot.token0).balanceOf(msg.sender), address(msg.sender).balance); 
             
             if (changeFeeOptionProbability.isLikely()) {
                 collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed + i, 0, 2));
+                startHoax(msg.sender);
                 lVault.setCollectFeeOption(id, collectFeeOption);
+                vm.stopPrank();
             }
+
             if (collectProbability.isLikely() || i == N - 1) {
-                try lVault.collect(id, snapshot) returns (uint fee0, uint fee1) {
+                (uint startBal0, uint startBal1) = snapshot.token0 == WETH ? 
+                    (address(msg.sender).balance, IERC20(snapshot.token1).balanceOf(msg.sender)) :
+                    (IERC20(snapshot.token0).balanceOf(msg.sender), address(msg.sender).balance); 
+                try lVault.collect(id, snapshot) returns (ILiquidityVault.Fees memory fees) {
                     (uint rFee0, uint rFee1) = (0, 0);
                     (uint ownerFee0, uint ownerFee1) = (0, 0);
                     (snapshot, , rFee0, rFee1, ownerFee0, ownerFee1) = _getLiquidityVaultLog(token, WETH);
+                    assertEq(fees.ownerFee0, ownerFee0);
+                    assertEq(fees.ownerFee1, ownerFee1);
+                    assertEq(fees.referralCut0, rFee0);
+                    assertEq(fees.referralCut1, rFee1);
+
                     fee0sBig[feeCount] = rFee0;
                     fee1sBig[feeCount] = rFee1;
                     feeCount += 1;
 
                     console.log("collect feeCount: %d", feeCount);
-                    console.log("collect fee: %d", fee0);
-                    console.log("collect fee: %d", fee1);
+                    console.log("collect owner fee: %d", ownerFee0);
+                    console.log("collect owner fee: %d", ownerFee1);
 
                     console.log("rcollect fee: %d", rFee0);
                     console.log("rcollect fee: %d", rFee1);

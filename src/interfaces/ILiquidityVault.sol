@@ -47,6 +47,15 @@ interface ILiquidityVault {
         Permit permit1;
     }
 
+    struct Fees {
+        uint256 ownerFee0;
+        uint256 ownerFee1;
+        uint256 cut0;
+        uint256 cut1;
+        uint256 referralCut0;
+        uint256 referralCut1;
+    }
+
     function WETH() external pure returns (address);
     function ETH() external pure returns (address);
     function mintFee(bool isReferred, uint16 feeLevelBIPS) external view returns (uint256, uint256,FeeInfo memory);
@@ -56,7 +65,7 @@ interface ILiquidityVault {
     function mint(address recipient, address referrer, MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
     // function mint(MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
     function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 added0, uint256 added1);
-    function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 ownerFee0, uint256 ownerFee1);
+    function collect(uint256 id, Snapshot calldata snapshot) external returns (Fees memory fees);
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external;
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external;
 

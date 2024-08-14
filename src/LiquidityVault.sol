@@ -336,7 +336,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         feeInfo = _decodeFeeSlot(_feeInfoSlot);
         if (isReferred) {
             mintFee = feeInfo.mintMaxFee * feeInfo.refMintDiscountBIPS / BIP_DIVISOR;
-            refFeeCut = feeInfo.mintMaxFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR;
+            refFeeCut = mintFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR;
         }
         else {
             uint256 discount = feeInfo.mintMaxFee * feeInfo.mintMaxDiscountBIPS / BIP_DIVISOR;
@@ -495,6 +495,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
 
+
     /**
      * @notice Collects owed fees from a Uniswap V2 liquidity pool without compromising the security and properties of the lock.
      * @dev Anyone can call this on behalf of a vaulted position, but fees will only be collected by the owner of the position.
@@ -505,10 +506,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      *        - uint256 amountIn0: The amount of the first token currently in the pool.
      *        - uint256 amountIn1: The amount of the second token currently in the pool.
      *        - uint256 liquidity: The total liquidity of the pool at the time of the snapshot.
-     * @return fee0 The amount of fee collected in token0.
-     * @return fee1 The amount of fee collected in token1.
+     * @return fees The amount of fee collected in token0.
     **/
-    function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 fee0, uint256 fee1) {
+    function collect(uint256 id, Snapshot calldata snapshot) external returns (Fees memory fees) {
         (, uint96 referralHash) = verifySnapshot(id, snapshot);
         (address owner, uint96 extraData) = _getOwnershipSlot(id);
         (, uint256 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) = _decodeExtraData(extraData);
@@ -522,82 +522,87 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 feeLiquidity = totalLiquidity - Math.sqrt(Math.mulDiv(totalLiquidity * totalLiquidity, snapshot.amountIn0 * snapshot.amountIn1, balance0 * balance1));
 
         if (feeLiquidity == 0) revert InsufficientLiquidityBurned();
-        (fee0, fee1) = _removeLiquidity(pool, feeLiquidity, address(this));
+        (fees.ownerFee0, fees.ownerFee1) = _removeLiquidity(pool, feeLiquidity, address(this));
 
         uint256 liquidity = snapshot.liquidity - feeLiquidity;
         /// @dev Inlined amountsFromLiquidityV2
         totalLiquidity -= feeLiquidity;
-        uint256 amountIn0 = liquidity * (balance0 - fee0) / totalLiquidity;
-        uint256 amountIn1 = liquidity * (balance1 - fee1) / totalLiquidity;
+        uint256 amountIn0 = liquidity * (balance0 - fees.ownerFee0) / totalLiquidity;
+        uint256 amountIn1 = liquidity * (balance1 - fees.ownerFee1) / totalLiquidity;
 
         /// @section Fee Breakdown
         FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
-        (uint256 cut0, uint256 cut1) = (0, 0);
+        // (uint256 cut0, uint256 cut1) = (0, 0);
 
-        if (referralHash != 0 && !ignoreReferrer) (cut0, cut1) = (
-            fee0 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR, 
-            fee1 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR);
+        if (referralHash != 0 && !ignoreReferrer) (fees.cut0, fees.cut1) = (
+            fees.ownerFee0 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR, 
+            fees.ownerFee1 * (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) / BIP_DIVISOR);
         else {
             // if feeLevelBIPS max it was max discount, therefore smallest amount of fee and ther fore greatst amount to protcol
-            uint256 lowFeeCut0 = fee0 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
-            uint256 lowFeeCut1 = fee1 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
+            uint256 lowFeeCut0 = fees.ownerFee0 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
+            uint256 lowFeeCut1 = fees.ownerFee1 * feeInfo.procotolCollectMinFeeCutBIPS / BIP_DIVISOR;
 
             /// @dev highest userFeeDiscountBIPS == 10_000 (100%) => gives protocol (fee0, fee1)
             ///      lowest  userFeeDiscountBIPS ==      0   (0%) => gives protocol (lowFeeCut0, lowFeeCut1)
-            (cut0, cut1) = (
-                lowFeeCut0 + (fee0 - lowFeeCut0) * feeLevelBIPS / BIP_DIVISOR,
-                lowFeeCut1 + (fee1 - lowFeeCut1) * feeLevelBIPS / BIP_DIVISOR
+            (fees.cut0, fees.cut1) = (
+                lowFeeCut0 + (fees.ownerFee0 - lowFeeCut0) * feeLevelBIPS / BIP_DIVISOR,
+                lowFeeCut1 + (fees.ownerFee1 - lowFeeCut1) * feeLevelBIPS / BIP_DIVISOR
             );
         }
 
-        (uint256 ownerFee0, uint256 ownerFee1) = (fee0 - cut0, fee1 - cut1);
+        fees.ownerFee0 = fees.ownerFee0 - fees.cut0;
+        fees.ownerFee1 = fees.ownerFee1 - fees.cut1;
 
         /// @dev all cut fees will be given in ETH and need to be swapped
-        uint256 swapCut0For1 = snapshot.token1 == WETH ? cut0 : 0;
-        uint256 swapCut1For0 = snapshot.token0 == WETH ? cut1 : 0;
+        uint256 swapCut0For1 = snapshot.token1 == WETH ? fees.cut0 : 0;
+        uint256 swapCut1For0 = snapshot.token0 == WETH ? fees.cut1 : 0;
 
-        uint256 ownerSwap0For1 = collectFeeOption == CollectFeeOption.TOKEN_1 ? ownerFee0 : 0;
-        uint256 ownerSwap1For0 = collectFeeOption == CollectFeeOption.TOKEN_0 ? ownerFee1 : 0;
+        uint256 ownerSwap0For1 = collectFeeOption == CollectFeeOption.TOKEN_1 ? fees.ownerFee0 : 0;
+        uint256 ownerSwap1For0 = collectFeeOption == CollectFeeOption.TOKEN_0 ? fees.ownerFee1 : 0;
 
 
         /// @dev all fee cuts will be taken in SUPPORTED BASE TOKENS whenever possible
         (uint256 swapedCut0, uint256 swapedOwnerFees0) = _swapFeesIfNeccessary(pool, snapshot.token0, snapshot.token1, true, swapCut1For0, ownerSwap1For0);
         (uint256 swapedCut1, uint256 swapedOwnerFees1) = _swapFeesIfNeccessary(pool, snapshot.token0, snapshot.token1, false, swapCut0For1, ownerSwap0For1);
-        ownerFee0 = ownerFee0 + swapedOwnerFees0 - ownerSwap0For1;
-        ownerFee1 = ownerFee1 + swapedOwnerFees1 - ownerSwap1For0;
-        cut0 = cut0 + swapedCut0 - swapCut0For1;
-        cut1 = cut1 + swapedCut1 - swapCut1For0;
+        fees.ownerFee0 = fees.ownerFee0 + swapedOwnerFees0;
+        fees.ownerFee0 = fees.ownerFee0 - ownerSwap0For1;
+        fees.ownerFee1 = fees.ownerFee1 + swapedOwnerFees1;
+        fees.ownerFee1 = fees.ownerFee1 - ownerSwap1For0;
+        fees.cut0 = fees.cut0 + swapedCut0;
+        fees.cut0 = fees.cut0 - swapCut0For1;
+        fees.cut1 = fees.cut1 + swapedCut1;
+        fees.cut1 = fees.cut1 - swapCut1For0;
 
         // Prep: WETH -> ETH
-        if (snapshot.token0 == WETH && (ownerFee0 + cut0) > 0) IWETH9(WETH).withdraw(ownerFee0 + cut0);
-        if (snapshot.token1 == WETH && (ownerFee1 + cut1) > 0) IWETH9(WETH).withdraw(ownerFee1 + cut1);
+        if (snapshot.token0 == WETH && (fees.ownerFee0 + fees.cut0) > 0) IWETH9(WETH).withdraw(fees.ownerFee0 + fees.cut0);
+        if (snapshot.token1 == WETH && (fees.ownerFee1 + fees.cut1) > 0) IWETH9(WETH).withdraw(fees.ownerFee1 + fees.cut1);
 
         // Payout: owner
-        if (ownerFee0 > 0) {
-            if (snapshot.token0 == WETH) payable(owner).transfer(ownerFee0);
-            else SafeTransferLib.safeTransfer(snapshot.token0, owner, ownerFee0);
+        if (fees.ownerFee0 > 0) {
+            if (snapshot.token0 == WETH) payable(owner).transfer(fees.ownerFee0);
+            else SafeTransferLib.safeTransfer(snapshot.token0, owner, fees.ownerFee0);
         }
-        if (ownerFee1 > 1) {
-            if (snapshot.token1 == WETH) payable(owner).transfer(ownerFee1);
-            else SafeTransferLib.safeTransfer(snapshot.token1, owner, ownerFee1);
+        if (fees.ownerFee1 > 1) {
+            if (snapshot.token1 == WETH) payable(owner).transfer(fees.ownerFee1);
+            else SafeTransferLib.safeTransfer(snapshot.token1, owner, fees.ownerFee1);
         }
 
-        (uint256 refCut0, uint256 refCut1) = (0, 0);
 
         // Update the Payout Merkle root
         if (referralHash != 0) {
-            refCut0 = cut0 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS);
-            refCut1 = cut1 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS);
+            uint16 cutFeeBIPS = feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS;
+            fees.referralCut0 = fees.cut0 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
+            fees.referralCut1 = fees.cut1 * feeInfo.refCollectFeeCutBIPS / cutFeeBIPS;
             referralHash = uint96(uint256(keccak256(abi.encodePacked(
-                uint96(uint256(keccak256(abi.encodePacked(referralHash, refCut0)))),
-               refCut1 
+                uint96(uint256(keccak256(abi.encodePacked(referralHash, fees.referralCut0)))),
+                fees.referralCut1
             ))));
         }
      
 
         // Payout: referrer or protocol
-        _payFeeCut(refCut0, cut0 - refCut0, snapshot.token0);
-        _payFeeCut(refCut1, cut1 - refCut1, snapshot.token1);
+        _payFeeCut(fees.referralCut0, fees.cut0 - fees.referralCut0, snapshot.token0);
+        _payFeeCut(fees.referralCut1, fees.cut1 - fees.referralCut1, snapshot.token1);
 
         hashInfoForCertificateID[id] = _encodeHashInfo(
             _encodeSnapshotID(Snapshot({
@@ -612,19 +617,16 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         emit Collected(
             id, 
-            fee0,
-            fee1,
+            fees.ownerFee0,
+            fees.ownerFee1,
             liquidity,
             amountIn0,
             amountIn1,
-            referralHash != 0 ? abi.encode(refCut0) : bytes(""),
-            referralHash != 0 ? abi.encode(refCut1) : bytes("")
+            referralHash != 0 ? abi.encode(fees.referralCut0) : bytes(""),
+            referralHash != 0 ? abi.encode(fees.referralCut1) : bytes("")
         );
     }
 
-    function _encodeFee(uint256 fee, uint256 ownerFee) internal pure returns (uint256) {
-        return fee << 128 | ownerFee;
-    }
 
     /**
      * @notice Redeems a locked liquidity position once its lock time is up.
