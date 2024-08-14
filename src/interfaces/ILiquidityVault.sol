@@ -56,7 +56,7 @@ interface ILiquidityVault {
     function mint(address recipient, address referrer, MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
     // function mint(MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
     function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 added0, uint256 added1);
-    function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 collectedFee0, uint256 collectedFee1);
+    function collect(uint256 id, Snapshot calldata snapshot) external returns (uint256 ownerFee0, uint256 ownerFee1);
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external;
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external;
 

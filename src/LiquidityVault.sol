@@ -46,8 +46,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     );
     event Collected(
         uint256 indexed id, 
-        uint256 fee0,
-        uint256 fee1,
+        uint256 ownerFee0,
+        uint256 ownerFee1,
         uint256 snapshotLiquidity,
         uint256 snapshotAmountIn0,
         uint256 snapshotAmountIn1,
@@ -568,9 +568,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         cut0 = cut0 + swapedCut0 - swapCut0For1;
         cut1 = cut1 + swapedCut1 - swapCut1For0;
 
-        // fee0 = fee0 + (swapedOwnerFees0 - ownerSwap0For1) + (swapedCut0 - swapCut0For1);
-        // fee1 = fee1 + (swapedOwnerFees1 - ownerSwap1For0) + (swapedCut1 - swapCut1For0);
-
         // Prep: WETH -> ETH
         if (snapshot.token0 == WETH && (ownerFee0 + cut0) > 0) IWETH9(WETH).withdraw(ownerFee0 + cut0);
         if (snapshot.token1 == WETH && (ownerFee1 + cut1) > 0) IWETH9(WETH).withdraw(ownerFee1 + cut1);
@@ -585,20 +582,22 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             else SafeTransferLib.safeTransfer(snapshot.token1, owner, ownerFee1);
         }
 
-        // Payout: referrer or protocol
-        uint256 refCut0 = referralHash != 0 ? cut0 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) : 0;
-        uint256 refCut1 = referralHash != 0 ? cut1 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS) : 0;
-        _payFeeCut(refCut0, cut0 - refCut0, snapshot.token0);
-        _payFeeCut(refCut1, cut1 - refCut1, snapshot.token1);
+        (uint256 refCut0, uint256 refCut1) = (0, 0);
 
         // Update the Payout Merkle root
         if (referralHash != 0) {
+            refCut0 = cut0 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS);
+            refCut1 = cut1 * feeInfo.refCollectFeeCutBIPS / (feeInfo.refCollectFeeCutBIPS + feeInfo.procotolCollectMinFeeCutBIPS);
             referralHash = uint96(uint256(keccak256(abi.encodePacked(
                 uint96(uint256(keccak256(abi.encodePacked(referralHash, refCut0)))),
                refCut1 
             ))));
         }
+     
 
+        // Payout: referrer or protocol
+        _payFeeCut(refCut0, cut0 - refCut0, snapshot.token0);
+        _payFeeCut(refCut1, cut1 - refCut1, snapshot.token1);
 
         hashInfoForCertificateID[id] = _encodeHashInfo(
             _encodeSnapshotID(Snapshot({
@@ -614,13 +613,17 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         emit Collected(
             id, 
             fee0,
-            fee1, 
+            fee1,
             liquidity,
             amountIn0,
             amountIn1,
             referralHash != 0 ? abi.encode(refCut0) : bytes(""),
             referralHash != 0 ? abi.encode(refCut1) : bytes("")
         );
+    }
+
+    function _encodeFee(uint256 fee, uint256 ownerFee) internal pure returns (uint256) {
+        return fee << 128 | ownerFee;
     }
 
     /**
