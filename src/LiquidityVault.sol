@@ -692,15 +692,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         if (!simpleExtend && (block.timestamp > uint256(unlockTime) || (unlockTime - block.timestamp) <= (MIN_LOCK_DURATION * 4 / 10))) {
             (uint160 snapshotHash, uint96 referralHash) = _decodeHashInfo(hashInfoForCertificateID[id]);
-            bool hadReferrer = referralHash != 0;// && !ignoreReferrer;
+            bool hadReferrer = referralHash != 0;
             bool wantsReferrer = referrer != address(0);
-
 
             if (newFeeLevelBIPS < feeLevelBIPS) {
                 FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
                 uint256 feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
                 uint256 refundETH = _validateFunds(feeOwed, 0);
-
 
                 // Pay Fee
                 payMaster.payFees{ value: feeOwed }(feeOwed);
