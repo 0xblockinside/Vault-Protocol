@@ -302,13 +302,13 @@ contract LiquidityVaultUnitTests is Test {
 
 
     function test_fallback() external {
-        vm.skip(true);
+        vm.skip(false);
         vm.expectRevert();
         payable(lVault).transfer(1 ether);
     }
 
     function test_lockForever(uint seed, uint boolSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         startHoax(msg.sender);
         (uint id, , , ILiquidityVault.Snapshot memory snapshot, , , , ) = _mintLockedLPPosition(
             isLPToken,
@@ -334,7 +334,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_refundSurplusFundsETH(uint ethSeed, uint surplusSeed, uint feeLevelSeed, uint collectFeeSeed) external {
-        vm.skip(true);
+        vm.skip(false);
         startHoax(msg.sender);
 
         TestERC20 tokenA = new TestERC20();
@@ -368,7 +368,7 @@ contract LiquidityVaultUnitTests is Test {
 
     // TODO: merge with above
     function test_refundSurplusToken(uint deficitSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeSeed) external {
-        vm.skip(true);
+        vm.skip(false);
         startHoax(msg.sender);
         // solhint-disable-next-line
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
@@ -403,7 +403,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_insufficintFundsETH(uint deficitSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeSeed) external {
-        vm.skip(true);
+        vm.skip(false);
         startHoax(msg.sender);
         // solhint-disable-next-line
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
@@ -438,7 +438,7 @@ contract LiquidityVaultUnitTests is Test {
     // This also tests that it gets burned and is unusable
     uint cachedTimestamp;
     function test_redeem(uint ethSeed, uint durationSeed, uint extendSeed, uint removeLPSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         cachedTimestamp = uint(block.timestamp);
         // uint cachedTimestamp = uint(block.timestamp); // BUG: strange bug, this doesnt get cached
         // solhint-disable-next-line
@@ -504,7 +504,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_nonOwnerRedeem(uint ethSeed, address randomAddress, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         vm.assume(randomAddress != address(0));
         startHoax(msg.sender);
         // solhint-disable-next-line
@@ -593,7 +593,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_feeChange(ILiquidityVault.FeeInfo memory feeSeeds, uint16 feeLevelSeed) external {
-        vm.skip(true);
+        vm.skip(false);
         // solhint-disable-next-line
         bytes4 INVALID_FEE = bytes4(keccak256("InvalidFee()"));
         // solhint-disable-next-line
@@ -712,7 +712,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_migration(uint ethSeed, uint durationSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         ISuccessor successor = new MockMigrationContract();
         lVault.setSuccessor(address(successor));
 
@@ -745,7 +745,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_transfer(address reciever, uint durationSeed, uint ethSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         vm.assume(reciever != address(0));
 
         // solhint-disable-next-line
@@ -782,7 +782,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_extendAfterGracePeriod(uint durationSeed, uint feeLevelSeed, uint newDurationSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         // solhint-disable-next-line
         bytes4 INSUFFICIENT_FUNDS = bytes4(keccak256("InsufficientFunds()"));
 
@@ -819,9 +819,10 @@ contract LiquidityVaultUnitTests is Test {
     }
 
      function test_extendFirstTimeReferrer(address referrer, address buyer, uint buySeed, uint durationSeed, uint newDurationSeed, uint feeLevelSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
 
         vm.assume(referrer > address(9));
+        vm.assume(referrer != 0x000000000000000000636F6e736F6c652e6c6f67);
         lVault.setReferrer(referrer, true);
 
         cachedTimestamp = uint(block.timestamp);
@@ -858,12 +859,14 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_extendIgnoredReferrerToNewReferrer(address referrer, address newReferrer, address buyer, uint buySeed, uint durationSeed, uint feeLevelSeed, bool technicallyCorrectOldReferrer, uint newFeeLevelSeed, uint collectFeeOptionSeed, uint advanceSeed, uint newRefFeeCutSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
 
         vm.assume(referrer > address(9));
         vm.assume(newReferrer > address(9) && newReferrer != referrer);
         vm.assume(referrer.code.length == 0);
         vm.assume(newReferrer.code.length == 0);
+        vm.assume(referrer != 0x000000000000000000636F6e736F6c652e6c6f67);
+        vm.assume(newReferrer != 0x000000000000000000636F6e736F6c652e6c6f67);
         lVault.setReferrer(referrer, true);
         lVault.setReferrer(newReferrer, true);
 
@@ -1000,7 +1003,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_extendBeforeGracePeriod(uint durationSeed, uint feeLevelSeed, uint newFeeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         cachedTimestamp = uint(block.timestamp);
         uint GRACE_PERIOD = MIN_LOCK_DURATION * 4 / 10;
 
@@ -1042,16 +1045,15 @@ contract LiquidityVaultUnitTests is Test {
 
     address[] wallets;
     function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed, uint feeLevelSeed, uint collectFeeOptionSeed, uint changeFeeOptionSeed, ILiquidityVault.FeeInfo memory feeInfoSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         // solhint-disable-next-line
         bytes4 NOT_REGISTERED = bytes4(keccak256("NotRegisteredRefferer()"));
 
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
         ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2));
 
-
-
         vm.assume(referrer > address(9));
+        vm.assume(referrer != 0x000000000000000000636F6e736F6c652e6c6f67);
         startHoax(msg.sender);
 
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
@@ -1304,7 +1306,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     function test_collect(uint durationSeed, uint ethSeed, uint preMintSeed, uint collectSeed, uint buySeed, uint sellSeed, uint advanceSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
-        vm.skip(true);
+        vm.skip(false);
         lVault.setFees(ILiquidityVault.FeeInfo({
             mintMaxFee: 0.1 ether,
             refMintFeeCutBIPS: 0,

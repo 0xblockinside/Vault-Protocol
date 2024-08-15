@@ -276,9 +276,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         liquidity = pair.mint(address(this));
 
         // Amount from liquidity
-        uint totalLiquidity = pair.totalSupply();
-        actualAmount0 = liquidity * (reserve0 + actualAmount0) / totalLiquidity;
-        actualAmount1 = liquidity * (reserve1 + actualAmount1) / totalLiquidity;
+        // uint totalLiquidity = pair.totalSupply();
+        actualAmount0 = IERC20(token0).balanceOf(pool); //liquidity * (reserve0 + actualAmount0) / totalLiquidity;
+        actualAmount1 = IERC20(token1).balanceOf(pool); //liquidity * (reserve1 + actualAmount1) / totalLiquidity;
     }
 
     function _swapFeesIfNeccessary(address pool, address token0, address token1, bool oneForZero, uint256 cutToSwap, uint256 ownerFeeToSwap) internal returns (uint256 swappedCut, uint256 swappedOwnerFee) {
@@ -452,11 +452,10 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             snapshot.token1 = pair.token1();
             uint256 balance0 = IERC20(snapshot.token0).balanceOf(address(pair));
             uint256 balance1 = IERC20(snapshot.token1).balanceOf(address(pair));
-            uint256 totalLiquidity = IERC20(params.tokenA).totalSupply();
             
             snapshot.liquidity = params.amountA;
-            snapshot.amountIn0 = snapshot.liquidity * balance0 / totalLiquidity;
-            snapshot.amountIn1 = snapshot.liquidity * balance1 / totalLiquidity;
+            snapshot.amountIn0 = balance0;
+            snapshot.amountIn1 = balance1;
         }
         else {
             if (params.tokenA == params.tokenB) revert IdenticalTokens();
@@ -541,15 +540,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         /// @dev link to calculation TODO
         uint256 feeLiquidity = totalLiquidity - Math.sqrt(Math.mulDiv(totalLiquidity * totalLiquidity, snapshot.amountIn0 * snapshot.amountIn1, balance0 * balance1));
+        feeLiquidity = feeLiquidity * snapshot.liquidity / totalLiquidity;
 
         if (feeLiquidity == 0) revert InsufficientLiquidityBurned();
         (fees.ownerFee0, fees.ownerFee1) = _removeLiquidity(pool, feeLiquidity, address(this));
 
-        uint256 liquidity = snapshot.liquidity - feeLiquidity;
-        /// @dev Inlined amountsFromLiquidityV2
-        totalLiquidity -= feeLiquidity;
-        uint256 amountIn0 = liquidity * (balance0 - fees.ownerFee0) / totalLiquidity;
-        uint256 amountIn1 = liquidity * (balance1 - fees.ownerFee1) / totalLiquidity;
+        uint256 amountIn0 = balance0 - fees.ownerFee0;
+        uint256 amountIn1 = balance1 - fees.ownerFee1;
 
         /// @section Fee Breakdown
         FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
@@ -632,7 +629,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
                 token1: snapshot.token1,
                 amountIn0: amountIn0,
                 amountIn1: amountIn1,
-                liquidity: liquidity
+                liquidity: snapshot.liquidity - feeLiquidity
             })),
             referralHash
         );
@@ -641,7 +638,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             id, 
             fees.ownerFee0,
             fees.ownerFee1,
-            liquidity,
+            snapshot.liquidity - feeLiquidity,
             amountIn0,
             amountIn1,
             fees.referralCut0 > 0 ? abi.encode(fees.referralCut0) : bytes(""),
@@ -698,13 +695,10 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             bool hadReferrer = referralHash != 0;// && !ignoreReferrer;
             bool wantsReferrer = referrer != address(0);
 
-            // console.log("extend->newFeeLevelBIPS: %d", newFeeLevelBIPS);
-            // console.log("extend->feeLevelBIPS:    %d", feeLevelBIPS);
 
             if (newFeeLevelBIPS < feeLevelBIPS) {
                 FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
                 uint256 feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
-                // console.log("extend pay for more unlock fees:    %d", feeOwed);
                 uint256 refundETH = _validateFunds(feeOwed, 0);
 
 
@@ -715,7 +709,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
                 if (refundETH > 0) payable(msg.sender).transfer(refundETH);
             }
             if (wantsReferrer) {
-                // console.log("extend wants referrer on new term");
                 if (!registeredReferrers[referrer]) revert NotRegisteredRefferer();
                 if (hadReferrer) {
                     uint96 zeroedReferrerHash = uint96(uint256(keccak256(abi.encodePacked(oldReferrer, uint256(0)))));
@@ -727,7 +720,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             }
 
             if (hadReferrer && !wantsReferrer) {
-                // console.log("extend without a referrer this time");
                 // need to flag the extradata
                 ignoreReferrer = true;
             }
@@ -736,8 +728,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         if (additionalTime == LOCK_FOREVER || additionalTime >= (LOCKED_FOREVER - unlockTime)) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
 
-        // console.log("block.timestamp: %d", block.timestamp);
-        // console.log("new unlockTime:  %d", unlockTime);
         if (block.timestamp >= unlockTime) revert(); /// @dev invalid extend time
 
         _setExtraData(id, _encodeExtraData(unlockTime, feeLevelBIPS, collectFeeOption, ignoreReferrer));
@@ -758,10 +748,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      *        - uint256 amountIn0: The amount of the first token in the pool.
      *        - uint256 amountIn1: The amount of the second token in the pool.
      *        - uint256 liquidity: The current liquidity of the pool.
-     * @return added0 The amount of the first token added to the pool.
-     * @return added1 The amount of the second token added to the pool.
+     * @return additionalLiquidity The amount of the second token added to the pool.
     **/
-    function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 added0, uint256 added1) {
+    function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 additionalLiquidity) {
         (, uint96 referralHash) = verifySnapshot(id, snapshot);
         _getAndValidateCertificateInfo(id);
         uint256 remainingBalance = _validateFunds(0, _getWETHNeeded(snapshot.token0, snapshot.token1, params.additional0, params.additional1));
@@ -777,8 +766,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         catch {}
 
         // Need to get current amount from 
-        (uint256 additionalLiquidity, uint256 refundETH) = (0, 0);
-        (additionalLiquidity, added0, added1, refundETH) = _addLiquidityV2(
+        uint256 refundETH;
+        (uint256 balance0, uint256 balance1) = (0, 0);
+        (additionalLiquidity, balance0, balance1, refundETH) = _addLiquidityV2(
             pair, 
             snapshot.token0,
             snapshot.token1,
@@ -791,30 +781,22 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         // Refund
         if (remainingBalance + refundETH > 0) payable(msg.sender).transfer(remainingBalance + refundETH);
 
-
-        uint256 snapshotLiquidity = snapshot.liquidity + additionalLiquidity;
-
-        // Inlined amountsFromLiquidityV2 since not used else where
-        uint256 totalLiquidity = IUniswapV2Pair(pair).totalSupply();
-        uint256 snapshotAmountIn0 = snapshotLiquidity * IERC20(snapshot.token0).balanceOf(pair) / totalLiquidity;
-        uint256 snapshotAmountIn1 = snapshotLiquidity * IERC20(snapshot.token1).balanceOf(pair) / totalLiquidity;
-
         hashInfoForCertificateID[id] = _encodeHashInfo(
             _encodeSnapshotID(Snapshot({
                 token0: snapshot.token0, 
                 token1: snapshot.token1,
-                amountIn0: snapshotAmountIn0,
-                amountIn1: snapshotAmountIn1,
-                liquidity: snapshotLiquidity
+                amountIn0: balance0,
+                amountIn1: balance1,
+                liquidity: snapshot.liquidity + additionalLiquidity
             })),
             referralHash
         );
 
         emit Increased(
             id, 
-            snapshotLiquidity,
-            snapshotAmountIn0,
-            snapshotAmountIn1
+            snapshot.liquidity + additionalLiquidity,
+            balance0,
+            balance1
         );
     }
 
