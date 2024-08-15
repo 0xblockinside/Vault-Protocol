@@ -31,30 +31,33 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         address token0,
         address token1,
         uint40 lockTime,
+        uint16 feeLevelBIPS,
         uint256 snapshotLiquidity,
-        uint256 snapshotAmountIn0,
-        uint256 snapshotAmountIn1,
+        uint256 snapshotBalance0,
+        uint256 snapshotBalance1,
         bytes referralFee
     );
     event Increased(
         uint256 indexed id, 
         uint256 snapshotLiquidity,
-        uint256 snapshotAmountIn0,
-        uint256 snapshotAmountIn1
+        uint256 snapshotBalance0,
+        uint256 snapshotBalance1
     );
     event Collected(
         uint256 indexed id, 
         uint256 ownerFee0,
         uint256 ownerFee1,
         uint256 snapshotLiquidity,
-        uint256 snapshotAmountIn0,
-        uint256 snapshotAmountIn1,
+        uint256 snapshotBalance0,
+        uint256 snapshotBalance1,
         bytes referralFee0,
         bytes referralFee1
     );
     event Extended(
         uint256 indexed id, 
-        uint32 additionalTime
+        uint32 additionalTime,
+        uint16 feeLevelBIPS,
+        address newReferrer
     );
     event Redeemed(uint256 indexed id);
     event Migrated(uint256 indexed id, address newToken);
@@ -66,6 +69,7 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
     IUniswapV2Factory constant V2_FACTORY = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant ETH = address(0);
+    address constant UNCHANGED_REFERRER = address(type(uint160).max);
     uint32 public constant LOCK_FOREVER = type(uint32).max;
     uint32 constant MIN_LOCK_DURATION = 7 days;
     uint40 constant LOCKED_FOREVER = type(uint40).max;
@@ -110,7 +114,7 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
     uint256 _feeInfoSlot =      0.1 ether | 
                                  0 << 160 |
                              7_333 << 176 |
-                             5_000 << 192 |
+                             3_000 << 192 |
                             10_000 << 208 |
                              2_667 << 224;
 
@@ -139,7 +143,7 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                  PRIVATE FUNCTIONS                         */
+    /*             SLOT DECODING/ENCODING FUNCTIONS               */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function _decodeExtraData(uint96 slot) internal pure returns (uint40 unlockTime, uint16 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) {
         unlockTime = uint40(slot);
@@ -187,6 +191,19 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         )));
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*               HELPER FUNCTIONS                             */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    function _resetReferralHash(uint256 id, address referrer, uint160 snapshotHash) internal {
+        hashInfoForCertificateID[id] = _encodeHashInfo(
+            snapshotHash,
+            uint96(uint256(keccak256(abi.encodePacked(referrer, uint256(0)))))
+        );
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*               PAYMENT HELPER FUNCTIONS                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function _resolveAndPermitIfNecessary(address token, Permit memory permit, uint256 amount) internal returns (address) {
         if (permit.enable && token != WETH) IPermitERC20(token).permit(msg.sender, address(this), amount, permit.deadline, permit.v, permit.r, permit.s);
         return token;
@@ -216,6 +233,44 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         }
     }
 
+    function _swapFeesIfNeccessary(address pool, address token0, address token1, bool oneForZero, uint256 cutToSwap, uint256 ownerFeeToSwap) internal returns (uint256 swappedCut, uint256 swappedOwnerFee) {
+        uint256 swapIn = cutToSwap + ownerFeeToSwap;
+        if (swapIn == 0) return (0, 0);
+
+        (address tokenIn, address tokenOut) = oneForZero ? (token1, token0) : (token0, token1);
+        (uint256 r0, uint256 r1, ) = IUniswapV2Pair(pool).getReserves();
+        (uint256 rIn, uint256 rOut) = oneForZero ? (r1, r0) : (r0, r1);
+
+        /// @dev we do early transfer then immediately query the balance due to potential tax tokens
+        SafeTransferLib.safeTransfer(tokenIn, pool, swapIn);
+        uint256 amountIn = IERC20(tokenIn).balanceOf(pool) - rIn;
+
+        /// @dev Inlined from UniswapV2Library
+        uint amountInWithFee = amountIn * 997;
+        uint numerator = amountInWithFee * rOut;
+        uint denominator = rIn * 1000 + amountInWithFee;
+        uint amountOut = numerator / denominator;
+
+        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
+        uint256 tokenOutPreBalance = tokenOut != WETH ? IERC20(tokenOut).balanceOf(address(this)) : 0;
+
+        IUniswapV2Pair(pool).swap(oneForZero ? amountOut : 0, oneForZero ? 0 : amountOut, address(this), new bytes(0));
+
+        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
+        if (tokenOut != WETH) amountOut = IERC20(tokenOut).balanceOf(address(this)) - tokenOutPreBalance;
+
+        swappedCut = amountOut * cutToSwap / swapIn;
+        swappedOwnerFee = amountOut - swappedCut;
+    }
+
+    function _payFeeCut(uint256 refCut, uint256 protocolCut, address token) internal {
+        if (refCut + protocolCut == 0) return;
+        if (token == WETH) payMaster.payFees{ value: refCut + protocolCut }(protocolCut);
+        else {
+            if (refCut > 0) SafeTransferLib.safeTransfer(token, address(payMaster), refCut);
+            if (protocolCut > 0) SafeTransferLib.safeTransfer(token, payMaster.OWNER(), refCut);
+        }
+    }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  UNISWAP FUNCTIONS                         */
@@ -278,44 +333,6 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         balance1 = IERC20(token1).balanceOf(pool);
     }
 
-    function _swapFeesIfNeccessary(address pool, address token0, address token1, bool oneForZero, uint256 cutToSwap, uint256 ownerFeeToSwap) internal returns (uint256 swappedCut, uint256 swappedOwnerFee) {
-        uint256 swapIn = cutToSwap + ownerFeeToSwap;
-        if (swapIn == 0) return (0, 0);
-
-        (address tokenIn, address tokenOut) = oneForZero ? (token1, token0) : (token0, token1);
-        (uint256 r0, uint256 r1, ) = IUniswapV2Pair(pool).getReserves();
-        (uint256 rIn, uint256 rOut) = oneForZero ? (r1, r0) : (r0, r1);
-
-        /// @dev we do early transfer then immediately query the balance due to potential tax tokens
-        SafeTransferLib.safeTransfer(tokenIn, pool, swapIn);
-        uint256 amountIn = IERC20(tokenIn).balanceOf(pool) - rIn;
-
-        /// @dev Inlined from UniswapV2Library
-        uint amountInWithFee = amountIn * 997;
-        uint numerator = amountInWithFee * rOut;
-        uint denominator = rIn * 1000 + amountInWithFee;
-        uint amountOut = numerator / denominator;
-
-        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
-        uint256 tokenOutPreBalance = tokenOut != WETH ? IERC20(tokenOut).balanceOf(address(this)) : 0;
-
-        IUniswapV2Pair(pool).swap(oneForZero ? amountOut : 0, oneForZero ? 0 : amountOut, address(this), new bytes(0));
-
-        /// @dev since out token may be a tax token amountOut may not be correct amount either so we should adjust
-        if (tokenOut != WETH) amountOut = IERC20(tokenOut).balanceOf(address(this)) - tokenOutPreBalance;
-
-        swappedCut = amountOut * cutToSwap / swapIn;
-        swappedOwnerFee = amountOut - swappedCut;
-    }
-
-    function _payFeeCut(uint256 refCut, uint256 protocolCut, address token) internal {
-        if (refCut + protocolCut == 0) return;
-        if (token == WETH) payMaster.payFees{ value: refCut + protocolCut }(protocolCut);
-        else {
-            if (refCut > 0) SafeTransferLib.safeTransfer(token, address(payMaster), refCut);
-            if (protocolCut > 0) SafeTransferLib.safeTransfer(token, payMaster.OWNER(), refCut);
-        }
-    }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  EXTERNAL FUNCTIONS                         */
@@ -329,7 +346,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         if (msg.sender != WETH) revert();
     }
 
-    //////////            GETTERS           //////////////
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                  GETTER FUNCTIONS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function mintFee(bool isReferred, uint16 feeLevelBIPS) public view returns (uint256 mintFee, uint256 refFeeCut, FeeInfo memory feeInfo) {
         if (feeLevelBIPS > BIP_DIVISOR) revert InvalidFeeLevel();
 
@@ -345,7 +364,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
 
     }
 
-    //////////            SETTERS             //////////////
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                  SETTER FUNCTIONS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function setFees(FeeInfo calldata feeInfo) external onlyOwner {
         FeeInfo memory oldFeeInfo = _decodeFeeSlot(_feeInfoSlot);
         if (feeInfo.mintMaxFee > type(uint144).max) revert InvalidFee();
@@ -381,15 +402,10 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         _setOwnershipSlot(id, owner, _encodeExtraData(unlockTime, feeLeverBIPS, feeOption, ignoreReferrer));
     }
 
-    function _resetReferralHash(uint256 id, address referrer, uint160 snapshotHash) internal {
-        hashInfoForCertificateID[id] = _encodeHashInfo(
-            snapshotHash,
-            uint96(uint256(keccak256(abi.encodePacked(referrer, uint256(0)))))
-        );
-    }
 
-
-    //////////            MIGRATION         //////////////
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                    API  FUNCTIONS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function verifySnapshot(uint256 id, Snapshot calldata snapshot) public view returns (uint160 snapshotHash, uint96 referralHash) {
         (snapshotHash, referralHash) = _decodeHashInfo(hashInfoForCertificateID[id]);
         if (snapshotHash != _encodeSnapshotID(snapshot)) revert InvalidLiquiditySnapshot();
@@ -404,8 +420,10 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
 
 
     /**
-     * @notice Launches a v2 liquidity position that is locked and allows owners to collect their swap fees.
+     * @notice Launches a uniswap v2 liquidity position that is locked that allows owners to collect swap fees.
+     * @notice You can create locked lp by directly locking existing LP tokens or by sending the consit
      * @dev Never transfer ERC20 tokens directly to this contract only native ETH.
+     * @dev ERC20 tokens may only be transferred to this contract via permit or approval
      * @param recipient The recipient and owner of the resulting locked liquidity position.
      * @param referrer The recipient and owner of the resulting locked liquidity position.
      * @param params The required arguments within a struct needed to allow permit transfer, structured as follows:
@@ -414,6 +432,7 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
      *        - Permit permitA: A struct containing the permit details for tokenA.
      *        - Permit permitB: A struct containing the permit details for tokenB.
      *        - uint256 amountA: The amount of tokenA to add to the pool.
+     *        - uint256 amountB: The amount of tokenB to add to the pool.
      *        - uint256 amountB: The amount of tokenB to add to the pool.
      *        - uint32 lockDuration: The duration for which the liquidity should be locked.
      *        - uint16 feeLevelBIPS: The amount of discount the user choses for their mint fee (BIPS)
@@ -498,6 +517,7 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
             snapshot.token0,
             snapshot.token1,
             params.lockDuration,
+            isReferred ? 0 : params.feeLevelBIPS,
             snapshot.liquidity, 
             snapshot.balance0,
             snapshot.balance1,
@@ -516,9 +536,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
      * @param snapshot A struct containing the necessary data to collect fees from a Uniswap V2 liquidity pool:
      *        - address token0: The address of the first token in the liquidity pool.
      *        - address token1: The address of the second token in the liquidity pool.
-     *        - uint256 amountIn0: The amount of the first token currently in the pool.
-     *        - uint256 amountIn1: The amount of the second token currently in the pool.
-     *        - uint256 liquidity: The total liquidity of the pool at the time of the snapshot.
+     *        - uint256 balance0: The amount of the first token in the pool.
+     *        - uint256 balance1: The amount of the second token in the pool.
+     *        - uint256 liquidity: The lock's liquidity share of the pool.
      * @return fees The amount of fee collected in token0.
     **/
     function collect(uint256 id, Snapshot calldata snapshot) external returns (CollectedFees memory fees) {
@@ -646,9 +666,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
      * @param snapshot The required arguments within a struct needed to allow permit transfer, structured as follows:
      *        - address token0: The address of the first token.
      *        - address token1: The address of the second token.
-     *        - uint256 amountIn0: The amount of the first token in the pool.
-     *        - uint256 amountIn1: The amount of the second token in the pool.
-     *        - uint256 liquidity: The current liquidity of the pool.
+     *        - uint256 balance0: The amount of the first token in the pool.
+     *        - uint256 balance1: The amount of the second token in the pool.
+     *        - uint256 liquidity: The lock's liquidity share of the pool.
      * @param removeLP If true, sends underlying tokens of the pool to the owner; if false, liquidity tokens are sent.
     **/
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external {
@@ -669,8 +689,12 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
 
     /**
      * @notice Extend the lock time of a locked liquidity position.
+     * @notice Locks can also change referrer & fee level
      * @param id The id of the liquidity position.
      * @param additionalTime The additional time to extend the lock duration. If set to LOCK_FOREVER, the position will be locked forever.
+     * @param newFeeLevelBIPS The new fee level in basis points (BIPS) for the extended lock duration.
+     * @param oldReferrer The referrer address before the extension.
+     * @param referrer The new referrer address to be set after the extension.
      */
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external {
         if (additionalTime < MIN_LOCK_DURATION) revert InvalidLockDuration();
@@ -708,10 +732,8 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
                 ignoreReferrer = false;
             }
 
-            if (hadReferrer && !wantsReferrer) {
-                // need to flag the extradata
-                ignoreReferrer = true;
-            }
+            // need to flag the extradata
+            if (hadReferrer && !wantsReferrer) ignoreReferrer = true;
         }
         
         if (additionalTime == LOCK_FOREVER || additionalTime >= (LOCKED_FOREVER - unlockTime)) unlockTime = LOCKED_FOREVER;
@@ -720,7 +742,12 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
         if (block.timestamp >= unlockTime) revert InvalidLockDuration(); /// @dev invalid extend time
 
         _setExtraData(id, _encodeExtraData(unlockTime, feeLevelBIPS, collectFeeOption, ignoreReferrer));
-        emit Extended(id, additionalTime);
+        emit Extended(
+            id, 
+            additionalTime, 
+            newFeeLevelBIPS, 
+            simpleExtend ? UNCHANGED_REFERRER : ignoreReferrer ? address(0) : referrer
+        );
     }
 
     /**
@@ -734,9 +761,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
      * @param snapshot The required arguments within a struct needed to allow permit transfer, structured as follows:
      *        - address token0: The address of the first token.
      *        - address token1: The address of the second token.
-     *        - uint256 amountIn0: The amount of the first token in the pool.
-     *        - uint256 amountIn1: The amount of the second token in the pool.
-     *        - uint256 liquidity: The current liquidity of the pool.
+     *        - uint256 balance0: The amount of the first token in the pool.
+     *        - uint256 balance1: The amount of the second token in the pool.
+     *        - uint256 liquidity: The lock's liquidity share of the pool.
      * @return additionalLiquidity The amount of the second token added to the pool.
     **/
     function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 additionalLiquidity) {
@@ -809,9 +836,9 @@ contract VaultPro is IVaultPro, ERC721Extended, Ownable {
      * @param snapshot The required arguments within a struct needed to allow permit transfer, structured as follows:
      *        - address token0: The address of the first token.
      *        - address token1: The address of the second token.
-     *        - uint256 amountIn0: The amount of the first token in the pool.
-     *        - uint256 amountIn1: The amount of the second token in the pool.
-     *        - uint256 liquidity: The current liquidity of the pool.
+     *        - uint256 balance0: The amount of the first token in the pool.
+     *        - uint256 balance1: The amount of the second token in the pool.
+     *        - uint256 liquidity: The lock's liquidity share of the pool.
      * @param successorParams The encoded params to be sent to the new vault
     **/
     function migrate(uint256 id, Snapshot calldata snapshot, bytes calldata successorParams) external returns (address token) {

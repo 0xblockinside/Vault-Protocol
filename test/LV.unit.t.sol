@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Unlicense
 pragma solidity ^0.8.26;
 
-import {ILiquidityVault} from "../src/interfaces/ILiquidityVault.sol";
-import "src/LiquidityVault.sol";
+import {IVaultPro} from "../src/interfaces/IVaultPro.sol";
+import "src/VaultPro.sol";
 import "src/PayMaster.sol";
 import "forge-std/Test.sol";
 import {TestERC20} from "./tokens/TestERC20.sol";
@@ -18,37 +18,37 @@ import {MockMigrationContract} from "./MockMigrationContract.sol";
 import {ISuccessor} from "../src/interfaces/ISuccessor.sol";
 
 library LiquidityVaultLogDecoder {
-    function decode(Vm.Log memory log) internal returns (ILiquidityVault.Snapshot memory snapshot, uint256 referralMintFee, uint256 referralFee0, uint256 referralFee1, uint256 ownerFee0, uint256 ownerFee1) {
-        if (log.topics[0] == keccak256("Minted(uint256,address,address,address,uint40,uint256,uint256,uint256,bytes)")) {
+    function decode(Vm.Log memory log) internal returns (IVaultPro.Snapshot memory snapshot, uint256 referralMintFee, uint256 referralFee0, uint256 referralFee1, uint256 ownerFee0, uint256 ownerFee1) {
+        if (log.topics[0] == keccak256("Minted(uint256,address,address,address,uint40,uint16,uint256,uint256,uint256,bytes)")) {
             bytes memory referralFeeData;
-            (, , , snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, referralFeeData) = abi.decode(log.data, (address, address, uint40, uint256, uint256, uint256, bytes));
+            (, , , , snapshot.liquidity, snapshot.balance0, snapshot.balance1, referralFeeData) = abi.decode(log.data, (address, address, uint40, uint16, uint256, uint256, uint256, bytes));
             console.log("LiquidityVaultLogDecoder[MINTED] referralFeeData:");
             console.log("                                 snapshot.liquidity: %d", snapshot.liquidity);
-            console.log("                                 snapshot.amountIn0: %d", snapshot.amountIn0);
-            console.log("                                 snapshot.amountIn1: %d", snapshot.amountIn1);
+            console.log("                                 snapshot.amountIn0: %d", snapshot.balance0);
+            console.log("                                 snapshot.amountIn1: %d", snapshot.balance1);
             console.logBytes(referralFeeData);
             if (referralFeeData.length > 0) referralMintFee = abi.decode(referralFeeData, (uint256));
         }
         else if (log.topics[0] == keccak256("Collected(uint256,uint256,uint256,uint256,uint256,uint256,bytes,bytes)")) {
             (bytes memory referralFeeData0, bytes memory referralFeeData1) = (bytes(""), bytes(""));
             console.log("LiquidityVaultLogDecoder[COLLECTED] pre:");
-            (ownerFee0, ownerFee1, snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, referralFeeData0, referralFeeData1) = abi.decode(log.data, (uint256, uint256, uint256, uint256, uint256, bytes, bytes));
+            (ownerFee0, ownerFee1, snapshot.liquidity, snapshot.balance0, snapshot.balance1, referralFeeData0, referralFeeData1) = abi.decode(log.data, (uint256, uint256, uint256, uint256, uint256, bytes, bytes));
             console.log("LiquidityVaultLogDecoder[COLLECTED] referralFeeData:");
             console.log("                                 snapshot.liquidity: %d", snapshot.liquidity);
-            console.log("                                 snapshot.amountIn0: %d", snapshot.amountIn0);
-            console.log("                                 snapshot.amountIn1: %d", snapshot.amountIn1);
+            console.log("                                 snapshot.amountIn0: %d", snapshot.balance0);
+            console.log("                                 snapshot.amountIn1: %d", snapshot.balance1);
             console.logBytes(referralFeeData0);
             console.logBytes(referralFeeData1);
             if (referralFeeData0.length > 0) referralFee0 = abi.decode(referralFeeData0, (uint256));
             if (referralFeeData1.length > 0) referralFee1 = abi.decode(referralFeeData1, (uint256));
         }
         else if (log.topics[0] == keccak256("Increased(uint256,uint256,uint256,uint256)")) {
-            (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1) = abi.decode(log.data, (uint256, uint256, uint256));
+            (snapshot.liquidity, snapshot.balance0, snapshot.balance1) = abi.decode(log.data, (uint256, uint256, uint256));
         }
         else if (log.topics[0] == keccak256("Redeemed(uint256)")) {
             // (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1) = abi.decode(log.data, (uint256, uint256, uint256));
         }
-        else if (log.topics[0] == keccak256("Extended(uint256,uint32)")) {
+        else if (log.topics[0] == keccak256("Extended(uint256,uint32,uint16,address)")) {
             // (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1) = abi.decode(log.data, (uint256, uint256, uint256));
         }
     }
@@ -114,8 +114,8 @@ contract LiquidityVaultUnitTests is Test {
     IUniswapV2Factory public constant V2_FACTORY = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f/*0x7E0987E5b3a30e3f2828572Bb659A548460a3003 */);
     IUniswapV2Router02 public constant V2_ROUTER = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
 
-    LiquidityVault lVault;
-    LiquidityVaultPayMaster payMaster;
+    VaultPro lVault;
+    VaultProPayMaster payMaster;
     address WETH;
     address ETH = address(0);
     uint BIP_DIVISOR = 10_000;
@@ -123,8 +123,8 @@ contract LiquidityVaultUnitTests is Test {
     uint32 MIN_LOCK_DURATION = 7 days;
 
     function setUp() external {
-        payMaster = new LiquidityVaultPayMaster(address(this));
-        lVault = new LiquidityVault(payMaster);
+        payMaster = new VaultProPayMaster(address(this));
+        lVault = new VaultPro(payMaster);
         payMaster.setLiquidityVault(address(lVault));
         WETH = lVault.WETH();
     }
@@ -183,7 +183,7 @@ contract LiquidityVaultUnitTests is Test {
         vm.stopPrank();
     }
 
-    function _getLiquidityVaultLog(address tokenA, address tokenB) internal returns (ILiquidityVault.Snapshot memory snapshot, uint referralMintFee, uint referralFee0, uint referralFee1, uint ownerFee0, uint ownerFee1) {
+    function _getLiquidityVaultLog(address tokenA, address tokenB) internal returns (IVaultPro.Snapshot memory snapshot, uint referralMintFee, uint referralFee0, uint referralFee1, uint ownerFee0, uint ownerFee1) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         Vm.Log memory log = logs[logs.length-1];
         console.log("[getLiquidityVaultLog] log:");
@@ -193,7 +193,7 @@ contract LiquidityVaultUnitTests is Test {
     }
 
 
-    function _mintLockedLPPosition(bool isLPToken, address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, uint16 feeLevelBIPS, ILiquidityVault.CollectFeeOption collectFeeOption, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFeeCut, ILiquidityVault.FeeInfo memory feeInfo) {
+    function _mintLockedLPPosition(bool isLPToken, address token, address referrer, uint amountTokenIn, uint amountETHIn, uint32 lockDuration, uint16 feeLevelBIPS, IVaultPro.CollectFeeOption collectFeeOption, bytes4 expectedRevert) internal returns (uint id, address targetToken, address pool, IVaultPro.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFeeCut, IVaultPro.FeeInfo memory feeInfo) {
         IERC20 tokenA = IERC20(token == address(0) ? address(new TestERC20()) : token);
         amountTokenIn = token == address(0) ? tokenA.totalSupply() : amountTokenIn;
         targetToken = address(tokenA);
@@ -212,9 +212,9 @@ contract LiquidityVaultUnitTests is Test {
         }
 
         (mintFee, rMintFeeCut, feeInfo) = lVault.mintFee(referrer != address(0), feeLevelBIPS);
-        ILiquidityVault.Snapshot memory mintSnapshot;
+        IVaultPro.Snapshot memory mintSnapshot;
         if (expectedRevert != 0) vm.expectRevert(expectedRevert);
-        (id, mintSnapshot) = lVault.mint{ value: (isLPToken ? 0 : amountETHIn) + mintFee }(msg.sender, referrer, ILiquidityVault.MintParams({
+        (id, mintSnapshot) = lVault.mint{ value: (isLPToken ? 0 : amountETHIn) + mintFee }(msg.sender, referrer, IVaultPro.MintParams({
             tokenA: isLPToken ? pool : address(tokenA),
             tokenB: ETH,
             permitA: NoPermit(),
@@ -227,7 +227,7 @@ contract LiquidityVaultUnitTests is Test {
             collectFeeOption: collectFeeOption
         }));
 
-        if (expectedRevert != 0) return (0, address(0), address(0), ILiquidityVault.Snapshot(address(0), address(0), 0, 0, 0), false, 0, 0, ILiquidityVault.FeeInfo(0, 0, 0, 0, 0, 0));
+        if (expectedRevert != 0) return (0, address(0), address(0), IVaultPro.Snapshot(address(0), address(0), 0, 0, 0), false, 0, 0, IVaultPro.FeeInfo(0, 0, 0, 0, 0, 0));
 
         uint _rMintFeeCut;
         (snapshot, _rMintFeeCut, , , , ) = _getLiquidityVaultLog(address(tokenA), WETH);
@@ -237,8 +237,8 @@ contract LiquidityVaultUnitTests is Test {
 
         pool = V2_FACTORY.getPair(snapshot.token0, snapshot.token1);
 
-        assertEq(mintSnapshot.amountIn0, snapshot.amountIn0);
-        assertEq(mintSnapshot.amountIn1, snapshot.amountIn1);
+        assertEq(mintSnapshot.balance0, snapshot.balance0);
+        assertEq(mintSnapshot.balance1, snapshot.balance1);
         assertEq(mintSnapshot.liquidity, snapshot.liquidity);
 
         console.log("mintFee: %d", mintFee);
@@ -249,7 +249,7 @@ contract LiquidityVaultUnitTests is Test {
         assertEq(mintFee - rMintFeeCut, address(this).balance - startDevBal);
     }
 
-    function _verifyReferralFees(uint id, address referrer, ILiquidityVault.Snapshot memory snapshot, address buyer, bool isToken0, address pool, uint seed) internal returns (ILiquidityVault.Snapshot memory) {
+    function _verifyReferralFees(uint id, address referrer, IVaultPro.Snapshot memory snapshot, address buyer, bool isToken0, address pool, uint seed) internal returns (IVaultPro.Snapshot memory) {
          swap(
             pool,
             buyer,
@@ -258,7 +258,7 @@ contract LiquidityVaultUnitTests is Test {
         );
 
         startHoax(msg.sender);
-        LiquidityVault.Fees memory fees = lVault.collect(id, snapshot);
+        VaultPro.CollectedFees memory fees = lVault.collect(id, snapshot);
         (snapshot, , , , , ) = _getLiquidityVaultLog(isToken0 ? snapshot.token0 : snapshot.token1, WETH);
 
         if (referrer == address(0)) {
@@ -275,13 +275,13 @@ contract LiquidityVaultUnitTests is Test {
             (address(referrer).balance, IERC20(snapshot.token1).balanceOf(address(referrer))) :
             (IERC20(snapshot.token0).balanceOf(address(referrer)), address(referrer).balance); 
 
-        LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+        VaultProPayMaster.ClaimParams[] memory params = new VaultProPayMaster.ClaimParams[](1);
         uint[] memory fee0s = new uint[](1);
         uint[] memory fee1s = new uint[](1);
         fee0s[0] = fees.referralCut0;
         fee1s[0] = fees.referralCut1;
 
-        params[0] = LiquidityVaultPayMaster.ClaimParams({
+        params[0] = VaultProPayMaster.ClaimParams({
             id: id,
             referrer: referrer,
             snapshot: snapshot,
@@ -310,7 +310,7 @@ contract LiquidityVaultUnitTests is Test {
     function test_lockForever(uint seed, uint boolSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
         vm.skip(false);
         startHoax(msg.sender);
-        (uint id, , , ILiquidityVault.Snapshot memory snapshot, , , , ) = _mintLockedLPPosition(
+        (uint id, , , IVaultPro.Snapshot memory snapshot, , , , ) = _mintLockedLPPosition(
             isLPToken,
             address(0),
             address(0),
@@ -318,7 +318,7 @@ contract LiquidityVaultUnitTests is Test {
             _bound(seed, 0.1 ether, 70 ether),
             lVault.LOCK_FOREVER(),
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -348,9 +348,9 @@ contract LiquidityVaultUnitTests is Test {
         uint preBal = msg.sender.balance;
 
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
-        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
+        IVaultPro.CollectFeeOption collectFeeOption = IVaultPro.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
         (uint mintFee, ,) = lVault.mintFee(false, feeLevelBIPS);
-        lVault.mint{ value: amountETHIn + mintFee + surplus }(msg.sender, address(0), ILiquidityVault.MintParams({
+        lVault.mint{ value: amountETHIn + mintFee + surplus }(msg.sender, address(0), IVaultPro.MintParams({
             tokenA: address(tokenA),
             tokenB: ETH,
             permitA: NoPermit(),
@@ -381,11 +381,11 @@ contract LiquidityVaultUnitTests is Test {
 
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
         (uint mintFee, ,) = lVault.mintFee(false, feeLevelBIPS);
-        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
+        IVaultPro.CollectFeeOption collectFeeOption = IVaultPro.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
 
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
-        lVault.mint{ value: amountETHIn + mintFee }(msg.sender, address(0), ILiquidityVault.MintParams({
+        lVault.mint{ value: amountETHIn + mintFee }(msg.sender, address(0), IVaultPro.MintParams({
             tokenA: address(tokenA),
             tokenB: ETH,
             permitA: NoPermit(),
@@ -415,13 +415,13 @@ contract LiquidityVaultUnitTests is Test {
 
 
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
-        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
+        IVaultPro.CollectFeeOption collectFeeOption = IVaultPro.CollectFeeOption(_bound(collectFeeSeed, 0, 2));
         (uint mintFee, ,) = lVault.mintFee(false, feeLevelBIPS);
 
         // solhint-disable-next-line
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
         vm.expectRevert(INSUFFICIENT_FUNDS);
-        lVault.mint{ value: _bound(deficitSeed, 0, (amountETHIn + mintFee) - 1) }(msg.sender, address(0), ILiquidityVault.MintParams({
+        lVault.mint{ value: _bound(deficitSeed, 0, (amountETHIn + mintFee) - 1) }(msg.sender, address(0), IVaultPro.MintParams({
             tokenA: address(tokenA),
             tokenB: ETH,
             permitA: NoPermit(),
@@ -447,7 +447,7 @@ contract LiquidityVaultUnitTests is Test {
         uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, lVault.LOCK_FOREVER() - 1)); // duration
 
         console.log("start WETH balance: %d", IERC20(WETH).balanceOf(msg.sender));
-        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
+        (uint id, , address pool, VaultPro.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -455,7 +455,7 @@ contract LiquidityVaultUnitTests is Test {
             _bound(ethSeed, 0.1 ether, 70 ether),
             duration,
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
         uint startBal0 = IERC20(snapshot.token0).balanceOf(msg.sender);
@@ -511,7 +511,7 @@ contract LiquidityVaultUnitTests is Test {
         bytes4 NOT_OWNER = bytes4(keccak256("NotOwnerNorApproved()"));
 
         uint32 duration = MIN_LOCK_DURATION;
-        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
+        (uint id, , , VaultPro.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -519,7 +519,7 @@ contract LiquidityVaultUnitTests is Test {
             _bound(ethSeed, 0.1 ether, 70 ether),
             duration,
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -543,7 +543,7 @@ contract LiquidityVaultUnitTests is Test {
         TestERC20 tokenA = new TestERC20();
         uint amountTokenIn = _bound(tokenSeed, 1, tokenA.totalSupply() - 1);
 
-        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , ,) = _mintLockedLPPosition(
+        (uint id, , address pool, VaultPro.Snapshot memory snapshot, bool isToken0, , ,) = _mintLockedLPPosition(
             isLPToken,
             address(tokenA), 
             address(0), 
@@ -551,7 +551,7 @@ contract LiquidityVaultUnitTests is Test {
             amountETHIn,
             duration,
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
         
@@ -574,7 +574,7 @@ contract LiquidityVaultUnitTests is Test {
         if (isInvalidLiquidity) vm.expectRevert(INVALID_LIQUIDITY_AMOUNTS);
         lVault.increase{ value: addETH } (
             id, 
-            ILiquidityVault.IncreaseParams({
+            IVaultPro.IncreaseParams({
                 additional0: add0,
                 additional1: add1,
                 permit0: NoPermit(),
@@ -592,14 +592,14 @@ contract LiquidityVaultUnitTests is Test {
 
     }
 
-    function test_feeChange(ILiquidityVault.FeeInfo memory feeSeeds, uint16 feeLevelSeed) external {
+    function test_feeChange(IVaultPro.FeeInfo memory feeSeeds, uint16 feeLevelSeed) external {
         vm.skip(false);
         // solhint-disable-next-line
         bytes4 INVALID_FEE = bytes4(keccak256("InvalidFee()"));
         // solhint-disable-next-line
         bytes4 INVALID_FEE_LEVEL = bytes4(keccak256("InvalidFeeLevel()"));
 
-        ILiquidityVault.FeeInfo memory oldFeeInfo;
+        IVaultPro.FeeInfo memory oldFeeInfo;
         (, , oldFeeInfo) = lVault.mintFee(false, 0);
 
         uint160 mintMaxFee = uint160(_bound(feeSeeds.mintMaxFee, 0, type(uint144).max));
@@ -607,7 +607,7 @@ contract LiquidityVaultUnitTests is Test {
         uint16 upperLimitProtCollectFee = uint16((BIP_DIVISOR - refCollectFeeCutBIPS) < oldFeeInfo.procotolCollectMinFeeCutBIPS ? (BIP_DIVISOR - refCollectFeeCutBIPS) : oldFeeInfo.procotolCollectMinFeeCutBIPS);
         uint16 procotolCollectMinFeeCutBIPS = uint16(_bound(feeSeeds.refCollectFeeCutBIPS, 0, upperLimitProtCollectFee));
 
-        ILiquidityVault.FeeInfo memory invalidFeeInfo = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory invalidFeeInfo = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, BIP_DIVISOR + 1, type(uint16).max)),
             refCollectFeeCutBIPS: refCollectFeeCutBIPS,
@@ -619,7 +619,7 @@ contract LiquidityVaultUnitTests is Test {
         vm.expectRevert(INVALID_FEE);
         lVault.setFees(invalidFeeInfo);
 
-        ILiquidityVault.FeeInfo memory invalidFeeInfo1 = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory invalidFeeInfo1 = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
             refCollectFeeCutBIPS: uint16(_bound(feeSeeds.refCollectFeeCutBIPS, BIP_DIVISOR + 1, type(uint16).max)),
@@ -630,7 +630,7 @@ contract LiquidityVaultUnitTests is Test {
         vm.expectRevert(INVALID_FEE);
         lVault.setFees(invalidFeeInfo1);
         
-        ILiquidityVault.FeeInfo memory invalidFeeInfo2 = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory invalidFeeInfo2 = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
             refCollectFeeCutBIPS: refCollectFeeCutBIPS,
@@ -641,7 +641,7 @@ contract LiquidityVaultUnitTests is Test {
         vm.expectRevert(INVALID_FEE);
         lVault.setFees(invalidFeeInfo2);
 
-        ILiquidityVault.FeeInfo memory invalidFeeInfo3 = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory invalidFeeInfo3 = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
             refCollectFeeCutBIPS: refCollectFeeCutBIPS,
@@ -653,7 +653,7 @@ contract LiquidityVaultUnitTests is Test {
         lVault.setFees(invalidFeeInfo3);
 
 
-        ILiquidityVault.FeeInfo memory invalidFeeInfo4 = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory invalidFeeInfo4 = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
             refCollectFeeCutBIPS: refCollectFeeCutBIPS,
@@ -664,7 +664,7 @@ contract LiquidityVaultUnitTests is Test {
         vm.expectRevert(INVALID_FEE);
         lVault.setFees(invalidFeeInfo4);
 
-        ILiquidityVault.FeeInfo memory validFeeInfo = ILiquidityVault.FeeInfo({
+        IVaultPro.FeeInfo memory validFeeInfo = IVaultPro.FeeInfo({
             mintMaxFee: mintMaxFee,
             refMintFeeCutBIPS: uint16(_bound(feeSeeds.refMintFeeCutBIPS, 0, BIP_DIVISOR)),
             refCollectFeeCutBIPS: refCollectFeeCutBIPS,
@@ -719,7 +719,7 @@ contract LiquidityVaultUnitTests is Test {
         startHoax(msg.sender);
         uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, lVault.LOCK_FOREVER() - 1)); // duration
         uint amountETHIn = _bound(ethSeed, 0.1 ether, 70 ether);
-        (uint id, address token, address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , ,) = _mintLockedLPPosition(
+        (uint id, address token, address pool, VaultPro.Snapshot memory snapshot, bool isToken0, , ,) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -727,7 +727,7 @@ contract LiquidityVaultUnitTests is Test {
             amountETHIn,
             duration,
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -755,7 +755,7 @@ contract LiquidityVaultUnitTests is Test {
         startHoax(msg.sender);
         uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, lVault.LOCK_FOREVER() - 1)); // duration
         uint amountETHIn = _bound(ethSeed, 0.1 ether, 70 ether);
-        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
+        (uint id, , , VaultPro.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -763,7 +763,7 @@ contract LiquidityVaultUnitTests is Test {
             amountETHIn,
             duration,
             uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -795,7 +795,7 @@ contract LiquidityVaultUnitTests is Test {
 
         startHoax(msg.sender);
 
-        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+        (uint id, , , VaultPro.Snapshot memory snapshot, , , , VaultPro.FeeInfo memory feeInfo) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -803,7 +803,7 @@ contract LiquidityVaultUnitTests is Test {
             1 ether,
             duration,
             feeLevelBIPS,
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -834,7 +834,7 @@ contract LiquidityVaultUnitTests is Test {
 
         startHoax(msg.sender);
 
-        (uint id, address token, address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+        (uint id, address token, address pool, VaultPro.Snapshot memory snapshot, bool isToken0, , , VaultPro.FeeInfo memory feeInfo) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -842,7 +842,7 @@ contract LiquidityVaultUnitTests is Test {
             1 ether,
             duration,
             feeLevelBIPS,
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -877,14 +877,14 @@ contract LiquidityVaultUnitTests is Test {
         uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
 
-        (, uint refMintFeeCut, LiquidityVault.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
+        (, uint refMintFeeCut, VaultPro.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
         _feeInfo.refMintFeeCutBIPS = uint16(_bound(newRefFeeCutSeed, 0, BIP_DIVISOR));
         lVault.setFees(_feeInfo);
         (, refMintFeeCut, ) = lVault.mintFee(true, feeLevelBIPS);
 
         startHoax(msg.sender);
 
-        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+        (uint id, , address pool, VaultPro.Snapshot memory snapshot, bool isToken0, , , VaultPro.FeeInfo memory feeInfo) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             referrer, 
@@ -892,7 +892,7 @@ contract LiquidityVaultUnitTests is Test {
             1 ether,
             duration,
             feeLevelBIPS,
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -916,11 +916,11 @@ contract LiquidityVaultUnitTests is Test {
         lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
 
         if (refMintFeeCut > 0) {
-            LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+            VaultProPayMaster.ClaimParams[] memory params = new VaultProPayMaster.ClaimParams[](1);
             uint[] memory fee0s = new uint[](0);
             uint[] memory fee1s = new uint[](0);
 
-            params[0] = LiquidityVaultPayMaster.ClaimParams({
+            params[0] = VaultProPayMaster.ClaimParams({
                 id: id,
                 referrer: referrer,
                 snapshot: snapshot,
@@ -957,13 +957,13 @@ contract LiquidityVaultUnitTests is Test {
         uint32 duration = uint32(_bound(durationSeed, MIN_LOCK_DURATION, LOCK_FOREVER - 1)); // duration
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
 
-        (, uint refMintFeeCut, LiquidityVault.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
+        (, uint refMintFeeCut, VaultPro.FeeInfo memory _feeInfo) = lVault.mintFee(true, feeLevelBIPS);
         _feeInfo.refMintFeeCutBIPS = uint16(_bound(newRefFeeCutSeed, 0, BIP_DIVISOR));
         lVault.setFees(_feeInfo);
         (, refMintFeeCut, ) = lVault.mintFee(true, feeLevelBIPS);
 
         startHoax(msg.sender);
-        (uint id, , address pool, LiquidityVault.Snapshot memory snapshot, bool isToken0, , , LiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+        (uint id, , address pool, VaultPro.Snapshot memory snapshot, bool isToken0, , , VaultPro.FeeInfo memory feeInfo) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             referrer, 
@@ -971,7 +971,7 @@ contract LiquidityVaultUnitTests is Test {
             1 ether,
             duration,
             feeLevelBIPS,
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -982,11 +982,11 @@ contract LiquidityVaultUnitTests is Test {
         lVault.extend(id, MIN_LOCK_DURATION, uint16(BIP_DIVISOR), referrer, newReferrer);
 
         if (refMintFeeCut > 0) {
-            LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
+            VaultProPayMaster.ClaimParams[] memory params = new VaultProPayMaster.ClaimParams[](1);
             uint[] memory fee0s = new uint[](0);
             uint[] memory fee1s = new uint[](0);
 
-            params[0] = LiquidityVaultPayMaster.ClaimParams({
+            params[0] = VaultProPayMaster.ClaimParams({
                 id: id,
                 referrer: referrer,
                 snapshot: snapshot,
@@ -1011,7 +1011,7 @@ contract LiquidityVaultUnitTests is Test {
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 1, BIP_DIVISOR));
 
         startHoax(msg.sender);
-        (uint id, , , LiquidityVault.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
+        (uint id, , , VaultPro.Snapshot memory snapshot, , , ,) = _mintLockedLPPosition(
             isLPToken,
             address(0), 
             address(0), 
@@ -1019,7 +1019,7 @@ contract LiquidityVaultUnitTests is Test {
             1 ether,
             duration,
             feeLevelBIPS,
-            ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
+            IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2)),
             bytes4("")
         );
 
@@ -1044,20 +1044,20 @@ contract LiquidityVaultUnitTests is Test {
     }
 
     address[] wallets;
-    function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed, uint feeLevelSeed, uint collectFeeOptionSeed, uint changeFeeOptionSeed, ILiquidityVault.FeeInfo memory feeInfoSeed, bool isLPToken) external logRecorder {
+    function test_referral(uint seed, uint immediateCollectSeed, address referrer, uint claimSeed, uint collectSeed, uint buySeed, uint sellSeed, uint feeLevelSeed, uint collectFeeOptionSeed, uint changeFeeOptionSeed, IVaultPro.FeeInfo memory feeInfoSeed, bool isLPToken) external logRecorder {
         vm.skip(false);
         // solhint-disable-next-line
         bytes4 NOT_REGISTERED = bytes4(keccak256("NotRegisteredRefferer()"));
 
         uint16 feeLevelBIPS = uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR));
-        ILiquidityVault.CollectFeeOption collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2));
+        IVaultPro.CollectFeeOption collectFeeOption = IVaultPro.CollectFeeOption(_bound(collectFeeOptionSeed, 0, 2));
 
         vm.assume(referrer > address(9));
         vm.assume(referrer != 0x000000000000000000636F6e736F6c652e6c6f67);
         startHoax(msg.sender);
 
         uint32 LOCK_FOREVER = lVault.LOCK_FOREVER();
-        (uint id, address token, address pool, ILiquidityVault.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, ILiquidityVault.FeeInfo memory feeInfo) = _mintLockedLPPosition(
+        (uint id, address token, address pool, IVaultPro.Snapshot memory snapshot, bool isToken0, uint mintFee, uint rMintFee, IVaultPro.FeeInfo memory feeInfo) = _mintLockedLPPosition(
             isLPToken,
             address(0),
             referrer,
@@ -1099,8 +1099,8 @@ contract LiquidityVaultUnitTests is Test {
             assertEq(rMintFee, mintFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR);
             uint refStartBal = address(referrer).balance;
 
-            LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
-            params[0] = LiquidityVaultPayMaster.ClaimParams({
+            VaultProPayMaster.ClaimParams[] memory params = new VaultProPayMaster.ClaimParams[](1);
+            params[0] = VaultProPayMaster.ClaimParams({
                 id: id,
                 referrer: referrer,
                 snapshot: snapshot,
@@ -1156,7 +1156,7 @@ contract LiquidityVaultUnitTests is Test {
             if (changeFeeOptionProbability.isLikely()) {
                 uint _dynamicFeeOptionSeed;
                 unchecked { _dynamicFeeOptionSeed = collectFeeOptionSeed + i; }
-                collectFeeOption = ILiquidityVault.CollectFeeOption(_bound(_dynamicFeeOptionSeed, 0, 2));
+                collectFeeOption = IVaultPro.CollectFeeOption(_bound(_dynamicFeeOptionSeed, 0, 2));
                 startHoax(msg.sender);
                 lVault.setCollectFeeOption(id, collectFeeOption);
                 vm.stopPrank();
@@ -1175,7 +1175,7 @@ contract LiquidityVaultUnitTests is Test {
                     (address(this).balance, IERC20(snapshot.token1).balanceOf(address(this))) :
                     (IERC20(snapshot.token0).balanceOf(address(this)), address(this).balance); 
 
-                try lVault.collect(id, snapshot) returns (ILiquidityVault.Fees memory fees) {
+                try lVault.collect(id, snapshot) returns (IVaultPro.CollectedFees memory fees) {
                     (uint rFee0, uint rFee1) = (0, 0);
                     (uint ownerFee0, uint ownerFee1) = (0, 0);
                     (snapshot, , rFee0, rFee1, ownerFee0, ownerFee1) = _getLiquidityVaultLog(token, WETH);
@@ -1212,15 +1212,15 @@ contract LiquidityVaultUnitTests is Test {
                     assertEq(fees.cut0 - fees.referralCut0, lastPBal0 - startPBal0);
                     assertEq(fees.cut1 - fees.referralCut1, lastPBal1 - startPBal1);
 
-                    if (collectFeeOption == ILiquidityVault.CollectFeeOption.BOTH) {
+                    if (collectFeeOption == IVaultPro.CollectFeeOption.BOTH) {
                         assertGt(ownerFee0, 0);
                         assertGt(ownerFee1, 0);
                     }
-                    if (collectFeeOption == ILiquidityVault.CollectFeeOption.TOKEN_0) {
+                    if (collectFeeOption == IVaultPro.CollectFeeOption.TOKEN_0) {
                         assertGt(ownerFee0, 0);
                         assertEq(ownerFee1, 0);
                     }
-                    if (collectFeeOption == ILiquidityVault.CollectFeeOption.TOKEN_1) {
+                    if (collectFeeOption == IVaultPro.CollectFeeOption.TOKEN_1) {
                         assertEq(ownerFee0, 0);
                         assertGt(ownerFee1, 0);
                     }
@@ -1253,8 +1253,8 @@ contract LiquidityVaultUnitTests is Test {
                             (address(referrer).balance, IERC20(snapshot.token1).balanceOf(referrer)) :
                             (IERC20(snapshot.token0).balanceOf(referrer), address(referrer).balance); 
 
-                        LiquidityVaultPayMaster.ClaimParams[] memory params = new LiquidityVaultPayMaster.ClaimParams[](1);
-                        params[0] = LiquidityVaultPayMaster.ClaimParams({
+                        VaultProPayMaster.ClaimParams[] memory params = new VaultProPayMaster.ClaimParams[](1);
+                        params[0] = VaultProPayMaster.ClaimParams({
                             id: id,
                             referrer: referrer,
                             snapshot: snapshot,
@@ -1307,7 +1307,7 @@ contract LiquidityVaultUnitTests is Test {
 
     function test_collect(uint durationSeed, uint ethSeed, uint preMintSeed, uint collectSeed, uint buySeed, uint sellSeed, uint advanceSeed, uint feeLevelSeed, uint collectFeeOptionSeed, bool isLPToken) external logRecorder {
         vm.skip(false);
-        lVault.setFees(ILiquidityVault.FeeInfo({
+        lVault.setFees(IVaultPro.FeeInfo({
             mintMaxFee: 0.1 ether,
             refMintFeeCutBIPS: 0,
             refCollectFeeCutBIPS: 0,
@@ -1331,7 +1331,7 @@ contract LiquidityVaultUnitTests is Test {
         address token;
         address pool; 
         bool isToken0;
-        ILiquidityVault.Snapshot memory snapshot;
+        IVaultPro.Snapshot memory snapshot;
 
         uint preSeedCount = _bound(preMintSeed, 0, 256);
 
@@ -1344,7 +1344,7 @@ contract LiquidityVaultUnitTests is Test {
                 amountInETH,
                 duration,
                 uint16(_bound(feeLevelSeed, 0, BIP_DIVISOR)),
-                ILiquidityVault.CollectFeeOption.BOTH,
+                IVaultPro.CollectFeeOption.BOTH,
                 bytes4("")
             );
         }
@@ -1357,7 +1357,7 @@ contract LiquidityVaultUnitTests is Test {
             amountInETH,
             duration,
             0,
-            ILiquidityVault.CollectFeeOption.BOTH,
+            IVaultPro.CollectFeeOption.BOTH,
             bytes4("")
         );
 
@@ -1463,7 +1463,5 @@ contract LiquidityVaultUnitTests is Test {
 
     }
 
-    function test_mintBringLP() external {
 
-    }
 }
