@@ -17,8 +17,6 @@ import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
 import {Token} from "./MigrationToken.sol";
 import {ISuccessor} from "./interfaces/ISuccessor.sol";
 
-import "forge-std/Test.sol";
-
 
 /// @notice A Liquidity Locker for Uniswap V2 that allows for fee collection without
 ///         compromising token traders safety.
@@ -54,8 +52,11 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         bytes referralFee0,
         bytes referralFee1
     );
+    event Extended(
+        uint256 indexed id, 
+        uint32 additionalTime
+    );
     event Redeemed(uint256 indexed id);
-    event Extended(uint256 indexed id, uint32 additionalTime);
     event Migrated(uint256 indexed id, address newToken);
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -64,11 +65,11 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     bytes32 constant INIT_CODE_HASH = 0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f;
     IUniswapV2Factory constant V2_FACTORY = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    address public constant ETH = address(0);
+    address constant ETH = address(0);
     uint32 public constant LOCK_FOREVER = type(uint32).max;
     uint32 constant MIN_LOCK_DURATION = 7 days;
     uint40 constant LOCKED_FOREVER = type(uint40).max;
-    uint16 public constant BIP_DIVISOR = 10_000;
+    uint16 constant BIP_DIVISOR = 10_000;
     IPayMaster immutable payMaster;
 
 
@@ -122,7 +123,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     /// - [160..256]    96 bits  `referralHash`
     mapping(uint256 => bytes32) hashInfoForCertificateID;
 
-    mapping(address => bool) public registeredReferrers;
+    mapping(address => bool) /*public*/ registeredReferrers;
 
 
 
@@ -337,7 +338,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
         feeInfo = _decodeFeeSlot(_feeInfoSlot);
         if (isReferred) {
-            mintFee = feeInfo.mintMaxFee * feeInfo.refMintDiscountBIPS / BIP_DIVISOR;
+            mintFee = feeInfo.mintMaxFee - feeInfo.mintMaxFee * feeInfo.refMintDiscountBIPS / BIP_DIVISOR;
             refFeeCut = mintFee * feeInfo.refMintFeeCutBIPS / BIP_DIVISOR;
         }
         else {
@@ -434,41 +435,58 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 protocolMintFeeCut = mintFee - refMintFeeCut;
         uint96 referrerHash = isReferred ? uint96(uint256(keccak256(abi.encodePacked(referrer, refMintFeeCut)))) : 0;
 
-        uint256 remainingBalance = _validateFunds(mintFee, _getWETHNeeded(params.tokenA, params.tokenB, params.amountA, params.amountB));
+        uint256 remainingBalance = _validateFunds(mintFee, params.isLPToken ? 0 : _getWETHNeeded(params.tokenA, params.tokenB, params.amountA, params.amountB));
         uint40 unlockTime = params.lockDuration == LOCK_FOREVER || (block.timestamp + params.lockDuration) > type(uint40).max ? LOCKED_FOREVER : uint40(block.timestamp + uint256(params.lockDuration));
 
         // Pay Fee
         payMaster.payFees{ value: mintFee }(protocolMintFeeCut);
 
-        // Token Validation & Address Resolvement
-        if (params.tokenA == params.tokenB) revert IdenticalTokens();
-        if (params.tokenA == WETH && params.tokenB == ETH) revert IdenticalTokens();
-        if (params.tokenB == WETH && params.tokenA == ETH) revert IdenticalTokens();
-        if (params.amountA == 0 || params.amountB == 0) revert ZeroTokenAmount();
-        (address tokenA, address tokenB) = (
-            (params.tokenA == ETH || params.tokenA == WETH) ? WETH : _resolveAndPermitIfNecessary(params.tokenA, params.permitA, params.amountA),
-            (params.tokenB == ETH || params.tokenB == WETH) ? WETH : _resolveAndPermitIfNecessary(params.tokenB, params.permitB, params.amountB)
-        );
-
-        (snapshot.token0, snapshot.token1) = _orderTokens(tokenA, tokenB);
-        (uint256 desiredAmount0, uint256 desiredAmount1) = snapshot.token0 == tokenA ? (params.amountA, params.amountB) : 
-                                                                                       (params.amountB, params.amountA);
-        address pool = V2_FACTORY.getPair(tokenA, tokenB);
-        pool = pool == address(0) ? V2_FACTORY.createPair(tokenA, tokenB) : pool;
-
-        /// @dev had to be sourced from params since tokenA/B && snapshot.token# are resolved
-        (bool isNativeETH0, bool isNativeETH1) = snapshot.token0 == tokenA ? (params.tokenA == ETH, params.tokenB == ETH) : 
-                                                                             (params.tokenB == ETH, params.tokenA == ETH);
         uint256 refundETH;
-        (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, refundETH) = _addLiquidityV2(
-            pool, 
-            snapshot.token0,
-            snapshot.token1,
-            desiredAmount0, 
-            desiredAmount1, 
-            !isNativeETH0, 
-            !isNativeETH1
-        );
+        // Token Validation & Address Resolvement
+        if (params.isLPToken) {
+            _resolveAndPermitIfNecessary(params.tokenA, params.permitA, params.amountA);
+            SafeTransferLib.safeTransferFrom(params.tokenA, msg.sender, address(this), params.amountA);
+
+            IUniswapV2Pair pair = IUniswapV2Pair(params.tokenA);
+            snapshot.token0 = pair.token0();
+            snapshot.token1 = pair.token1();
+            uint256 balance0 = IERC20(snapshot.token0).balanceOf(address(pair));
+            uint256 balance1 = IERC20(snapshot.token1).balanceOf(address(pair));
+            uint256 totalLiquidity = IERC20(params.tokenA).totalSupply();
+            
+            snapshot.liquidity = params.amountA;
+            snapshot.amountIn0 = snapshot.liquidity * balance0 / totalLiquidity;
+            snapshot.amountIn1 = snapshot.liquidity * balance1 / totalLiquidity;
+        }
+        else {
+            if (params.tokenA == params.tokenB) revert IdenticalTokens();
+            if (params.tokenA == WETH && params.tokenB == ETH) revert IdenticalTokens();
+            if (params.tokenB == WETH && params.tokenA == ETH) revert IdenticalTokens();
+            if (params.amountA == 0 || params.amountB == 0) revert ZeroTokenAmount();
+            (address tokenA, address tokenB) = (
+                (params.tokenA == ETH || params.tokenA == WETH) ? WETH : _resolveAndPermitIfNecessary(params.tokenA, params.permitA, params.amountA),
+                (params.tokenB == ETH || params.tokenB == WETH) ? WETH : _resolveAndPermitIfNecessary(params.tokenB, params.permitB, params.amountB)
+            );
+
+            (snapshot.token0, snapshot.token1) = _orderTokens(tokenA, tokenB);
+            (uint256 desiredAmount0, uint256 desiredAmount1) = snapshot.token0 == tokenA ? (params.amountA, params.amountB) : 
+                                                                                           (params.amountB, params.amountA);
+            address pool = V2_FACTORY.getPair(tokenA, tokenB);
+            pool = pool == address(0) ? V2_FACTORY.createPair(tokenA, tokenB) : pool;
+
+            /// @dev had to be sourced from params since tokenA/B && snapshot.token# are resolved
+            (bool isNativeETH0, bool isNativeETH1) = snapshot.token0 == tokenA ? (params.tokenA == ETH, params.tokenB == ETH) : 
+                                                                                 (params.tokenB == ETH, params.tokenA == ETH);
+            (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, refundETH) = _addLiquidityV2(
+                pool, 
+                snapshot.token0,
+                snapshot.token1,
+                desiredAmount0, 
+                desiredAmount1, 
+                !isNativeETH0, 
+                !isNativeETH1
+            );
+        }
 
         // Refund
         if (remainingBalance + refundETH > 0) payable(msg.sender).transfer(remainingBalance + refundETH);
@@ -680,13 +698,13 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             bool hadReferrer = referralHash != 0;// && !ignoreReferrer;
             bool wantsReferrer = referrer != address(0);
 
-            console.log("extend->newFeeLevelBIPS: %d", newFeeLevelBIPS);
-            console.log("extend->feeLevelBIPS:    %d", feeLevelBIPS);
+            // console.log("extend->newFeeLevelBIPS: %d", newFeeLevelBIPS);
+            // console.log("extend->feeLevelBIPS:    %d", feeLevelBIPS);
 
             if (newFeeLevelBIPS < feeLevelBIPS) {
                 FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
                 uint256 feeOwed = feeInfo.mintMaxFee * (feeLevelBIPS - newFeeLevelBIPS) / BIP_DIVISOR;
-                console.log("extend pay for more unlock fees:    %d", feeOwed);
+                // console.log("extend pay for more unlock fees:    %d", feeOwed);
                 uint256 refundETH = _validateFunds(feeOwed, 0);
 
 
@@ -697,7 +715,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
                 if (refundETH > 0) payable(msg.sender).transfer(refundETH);
             }
             if (wantsReferrer) {
-                console.log("extend wants referrer on new term");
+                // console.log("extend wants referrer on new term");
                 if (!registeredReferrers[referrer]) revert NotRegisteredRefferer();
                 if (hadReferrer) {
                     uint96 zeroedReferrerHash = uint96(uint256(keccak256(abi.encodePacked(oldReferrer, uint256(0)))));
@@ -709,7 +727,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             }
 
             if (hadReferrer && !wantsReferrer) {
-                console.log("extend without a referrer this time");
+                // console.log("extend without a referrer this time");
                 // need to flag the extradata
                 ignoreReferrer = true;
             }
@@ -718,8 +736,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         if (additionalTime == LOCK_FOREVER || additionalTime >= (LOCKED_FOREVER - unlockTime)) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
 
-        console.log("block.timestamp: %d", block.timestamp);
-        console.log("new unlockTime:  %d", unlockTime);
+        // console.log("block.timestamp: %d", block.timestamp);
+        // console.log("new unlockTime:  %d", unlockTime);
         if (block.timestamp >= unlockTime) revert(); /// @dev invalid extend time
 
         _setExtraData(id, _encodeExtraData(unlockTime, feeLevelBIPS, collectFeeOption, ignoreReferrer));

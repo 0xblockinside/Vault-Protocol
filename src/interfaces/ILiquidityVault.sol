@@ -27,6 +27,7 @@ interface ILiquidityVault {
         Permit permitB;
         uint256 amountA;
         uint256 amountB;
+        bool isLPToken;
         uint32 lockDuration;
         uint16 feeLevelBIPS;
         CollectFeeOption collectFeeOption;
@@ -57,7 +58,7 @@ interface ILiquidityVault {
     }
 
     function WETH() external pure returns (address);
-    function ETH() external pure returns (address);
+    // function ETH() external pure returns (address);
     function mintFee(bool isReferred, uint16 feeLevelBIPS) external view returns (uint256, uint256,FeeInfo memory);
     // function unlockTime(uint256 id) external view returns (uint256);
 
