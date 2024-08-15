@@ -1,7 +1,7 @@
 [profile.default]
 via_ir = true
 optimizer = true
-optimizer_runs =  218
+optimizer_runs =  110
 fs_permissions = [{ access = "write", path = "./"}]
 
 

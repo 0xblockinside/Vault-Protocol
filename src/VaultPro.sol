@@ -13,15 +13,15 @@ import {IPermitERC20, IERC20} from "shared/interfaces/IERC20Extended.sol";
 import {IUniswapV2Factory} from "v2-core/interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "v2-core/interfaces/IUniswapV2Pair.sol";
 import {IPayMaster} from "./interfaces/IPayMaster.sol";
-import {ILiquidityVault} from "./interfaces/ILiquidityVault.sol";
+import {IVaultPro} from "./interfaces/IVaultPro.sol";
 import {Token} from "./MigrationToken.sol";
 import {ISuccessor} from "./interfaces/ISuccessor.sol";
 
 
 /// @notice A Liquidity Locker for Uniswap V2 that allows for fee collection without
-///         compromising token traders safety.
-/// @author Blockinside (https://github.com/0xblockinside/LiquidityVault/blob/master/src/LiquidityVault.sol)
-contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
+///         compromising trading safety.
+/// @author Blockinside (https://blockinside.org/)
+contract VaultPro is IVaultPro, ERC721Extended, Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          EVENTS                            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -72,7 +72,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     uint16 constant BIP_DIVISOR = 10_000;
     IPayMaster immutable payMaster;
 
-
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          ERRORS                            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -89,8 +88,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     error InsufficientLiquidityBurned();
     error InvalidLockDuration();
 
-    function name() public pure override returns (string memory) { return "Liquidity Vault"; }
-    function symbol() public pure override returns (string memory) { return "LPVault"; }
+    function name() public pure override returns (string memory) { return "Vault Protocol"; }
+    function symbol() public pure override returns (string memory) { return "VaultPro"; }
 
     function tokenURI(uint256 id) public pure override returns (string memory) {
         return "";
@@ -117,15 +116,12 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
     ISuccessor _successor;
 
-
     /// Bits Layout of 'hashInfoForCertificateID.slot':
     /// - [0..159]     160 bits  `snapshotHash: keccak256(abi.encodePacked(token0, token1, snapshotIn0, snapshotIn1, liquidity))`
     /// - [160..256]    96 bits  `referralHash`
     mapping(uint256 => bytes32) hashInfoForCertificateID;
 
-    mapping(address => bool) /*public*/ registeredReferrers;
-
-
+    mapping(address => bool) public registeredReferrers;
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                     STORAGE HITCHHIKING                    */
@@ -184,8 +180,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             abi.encodePacked(
                 snapshot.token0,
                 snapshot.token1,
-                snapshot.amountIn0,
-                snapshot.amountIn1,
+                snapshot.balance0,
+                snapshot.balance1,
                 snapshot.liquidity
             )
         )));
@@ -221,7 +217,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
 
-    /////////////    Uniswap v2 related functions   /////////////////////////
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                  UNISWAP FUNCTIONS                         */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
     function _orderTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
         (token0, token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
     }
@@ -238,16 +236,16 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
 
     function _removeLiquidity(address pool, uint liquidity, address to) internal returns (uint amount0, uint amount1) {
         IUniswapV2Pair pair = IUniswapV2Pair(pool);
-        SafeTransferLib.safeTransfer(pool, pool, liquidity); // send liquidity to pair (caller -> pair)
+        SafeTransferLib.safeTransfer(pool, pool, liquidity);
         (amount0, amount1) = pair.burn(to); 
     }
 
-    /// @dev  input assumptions, amounts non zero, token0 & token1 are valid to the pair
-    function _addLiquidityV2(address pool, address token0, address token1, uint256 amount0, uint256 amount1, bool transferFrom0, bool transferFrom1) internal returns (uint256 liquidity, uint256 actualAmount0, uint256 actualAmount1, uint256 refundETH) {
+    /// @dev input assumptions: amounts non zero, token0 & token1 are valid to the pair
+    function _addLiquidityV2(address pool, address token0, address token1, uint256 amount0, uint256 amount1, bool transferFrom0, bool transferFrom1) internal returns (uint256 liquidity, uint256 balance0, uint256 balance1, uint256 refundETH) {
         IUniswapV2Pair pair = IUniswapV2Pair(pool);
 
-        (actualAmount0, actualAmount1) = (amount0, amount1);
-        (uint reserve0, uint reserve1, ) = pair.getReserves();
+        (uint256 actualAmount0, uint256 actualAmount1) = (amount0, amount1);
+        (uint256 reserve0, uint256 reserve1, ) = pair.getReserves();
 
         // Quote price only if and the pool has reserves
         if (!(reserve0 == 0 && reserve1 == 0)) {
@@ -276,9 +274,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         liquidity = pair.mint(address(this));
 
         // Amount from liquidity
-        // uint totalLiquidity = pair.totalSupply();
-        actualAmount0 = IERC20(token0).balanceOf(pool); //liquidity * (reserve0 + actualAmount0) / totalLiquidity;
-        actualAmount1 = IERC20(token1).balanceOf(pool); //liquidity * (reserve1 + actualAmount1) / totalLiquidity;
+        balance0 = IERC20(token0).balanceOf(pool);
+        balance1 = IERC20(token1).balanceOf(pool);
     }
 
     function _swapFeesIfNeccessary(address pool, address token0, address token1, bool oneForZero, uint256 cutToSwap, uint256 ownerFeeToSwap) internal returns (uint256 swappedCut, uint256 swappedOwnerFee) {
@@ -349,11 +346,9 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
     }
 
     //////////            SETTERS             //////////////
-    // TODO: if feeINfo is calldata is there any benefits or is it actuall less permoanct since it
-    // needs to be copied 
     function setFees(FeeInfo calldata feeInfo) external onlyOwner {
         FeeInfo memory oldFeeInfo = _decodeFeeSlot(_feeInfoSlot);
-        if (feeInfo.mintMaxFee > type(uint144).max) revert();
+        if (feeInfo.mintMaxFee > type(uint144).max) revert InvalidFee();
         if (feeInfo.procotolCollectMinFeeCutBIPS > oldFeeInfo.procotolCollectMinFeeCutBIPS) revert InvalidFee();
         if (feeInfo.refMintFeeCutBIPS > BIP_DIVISOR) revert InvalidFee();
         if (feeInfo.refMintDiscountBIPS > BIP_DIVISOR) revert InvalidFee();
@@ -454,8 +449,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             uint256 balance1 = IERC20(snapshot.token1).balanceOf(address(pair));
             
             snapshot.liquidity = params.amountA;
-            snapshot.amountIn0 = balance0;
-            snapshot.amountIn1 = balance1;
+            snapshot.balance0 = balance0;
+            snapshot.balance1 = balance1;
         }
         else {
             if (params.tokenA == params.tokenB) revert IdenticalTokens();
@@ -476,7 +471,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             /// @dev had to be sourced from params since tokenA/B && snapshot.token# are resolved
             (bool isNativeETH0, bool isNativeETH1) = snapshot.token0 == tokenA ? (params.tokenA == ETH, params.tokenB == ETH) : 
                                                                                  (params.tokenB == ETH, params.tokenA == ETH);
-            (snapshot.liquidity, snapshot.amountIn0, snapshot.amountIn1, refundETH) = _addLiquidityV2(
+            (snapshot.liquidity, snapshot.balance0, snapshot.balance1, refundETH) = _addLiquidityV2(
                 pool, 
                 snapshot.token0,
                 snapshot.token1,
@@ -504,8 +499,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             snapshot.token1,
             params.lockDuration,
             snapshot.liquidity, 
-            snapshot.amountIn0,
-            snapshot.amountIn1,
+            snapshot.balance0,
+            snapshot.balance1,
             isReferred ? abi.encode(uint256(refMintFeeCut)) : bytes("")
         );
 
@@ -513,8 +508,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         _incrementBalance(recipient, 1);
         _idTracker++;
     }
-
-
 
     /**
      * @notice Collects owed fees from a Uniswap V2 liquidity pool without compromising the security and properties of the lock.
@@ -528,7 +521,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      *        - uint256 liquidity: The total liquidity of the pool at the time of the snapshot.
      * @return fees The amount of fee collected in token0.
     **/
-    function collect(uint256 id, Snapshot calldata snapshot) external returns (Fees memory fees) {
+    function collect(uint256 id, Snapshot calldata snapshot) external returns (CollectedFees memory fees) {
         (, uint96 referralHash) = verifySnapshot(id, snapshot);
         (address owner, uint96 extraData) = _getOwnershipSlot(id);
         (, uint256 feeLevelBIPS, CollectFeeOption collectFeeOption, bool ignoreReferrer) = _decodeExtraData(extraData);
@@ -539,14 +532,14 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         uint256 totalLiquidity = IERC20(pool).totalSupply();
 
         /// @dev link to calculation TODO
-        uint256 feeLiquidity = totalLiquidity - Math.sqrt(Math.mulDiv(totalLiquidity * totalLiquidity, snapshot.amountIn0 * snapshot.amountIn1, balance0 * balance1));
+        uint256 feeLiquidity = totalLiquidity - Math.sqrt(Math.mulDiv(totalLiquidity * totalLiquidity, snapshot.balance0 * snapshot.balance1, balance0 * balance1));
         feeLiquidity = feeLiquidity * snapshot.liquidity / totalLiquidity;
 
         if (feeLiquidity == 0) revert InsufficientLiquidityBurned();
         (fees.ownerFee0, fees.ownerFee1) = _removeLiquidity(pool, feeLiquidity, address(this));
 
-        uint256 amountIn0 = balance0 - fees.ownerFee0;
-        uint256 amountIn1 = balance1 - fees.ownerFee1;
+        balance0 = balance0 - fees.ownerFee0;
+        balance1 = balance1 - fees.ownerFee1;
 
         /// @section Fee Breakdown
         FeeInfo memory feeInfo = _decodeFeeSlot(_feeInfoSlot);
@@ -627,8 +620,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             _encodeSnapshotID(Snapshot({
                 token0: snapshot.token0,
                 token1: snapshot.token1,
-                amountIn0: amountIn0,
-                amountIn1: amountIn1,
+                balance0: balance0,
+                balance1: balance1,
                 liquidity: snapshot.liquidity - feeLiquidity
             })),
             referralHash
@@ -639,8 +632,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             fees.ownerFee0,
             fees.ownerFee1,
             snapshot.liquidity - feeLiquidity,
-            amountIn0,
-            amountIn1,
+            balance0,
+            balance1,
             fees.referralCut0 > 0 ? abi.encode(fees.referralCut0) : bytes(""),
             fees.referralCut1 > 0 ? abi.encode(fees.referralCut1) : bytes("")
         );
@@ -680,8 +673,6 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
      * @param additionalTime The additional time to extend the lock duration. If set to LOCK_FOREVER, the position will be locked forever.
      */
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external {
-        // If you have served part of your lock you should be able to collect fee lever
-        // or perhaps at least get rid of your referrer
         if (additionalTime < MIN_LOCK_DURATION) revert InvalidLockDuration();
 
         (uint96 extraData, ) = _getAndValidateCertificateInfo(id);
@@ -726,7 +717,7 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
         if (additionalTime == LOCK_FOREVER || additionalTime >= (LOCKED_FOREVER - unlockTime)) unlockTime = LOCKED_FOREVER;
         else unlockTime += additionalTime;
 
-        if (block.timestamp >= unlockTime) revert(); /// @dev invalid extend time
+        if (block.timestamp >= unlockTime) revert InvalidLockDuration(); /// @dev invalid extend time
 
         _setExtraData(id, _encodeExtraData(unlockTime, feeLevelBIPS, collectFeeOption, ignoreReferrer));
         emit Extended(id, additionalTime);
@@ -783,8 +774,8 @@ contract LiquidityVault is ILiquidityVault, ERC721Extended, Ownable {
             _encodeSnapshotID(Snapshot({
                 token0: snapshot.token0, 
                 token1: snapshot.token1,
-                amountIn0: balance0,
-                amountIn1: balance1,
+                balance0: balance0,
+                balance1: balance1,
                 liquidity: snapshot.liquidity + additionalLiquidity
             })),
             referralHash

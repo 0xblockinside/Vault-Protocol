@@ -4,12 +4,12 @@ pragma solidity ^0.8.26;
 
 import {SafeTransferLib} from "solady/src/utils/SafeTransferLib.sol";
 import {IPayMaster} from "./interfaces/IPayMaster.sol";
-import {ILiquidityVaultReferral} from "./interfaces/ILiquidityVault.sol";
+import {IVaultProReferral} from "./interfaces/IVaultPro.sol";
 
 /// @notice The Paymaster for LiquidityVault that allows for referrers to collect
 ///         their fees via a merkle proof
 /// @author Blockinside (https://github.com/0xblockinside/LiquidityVault/blob/master/src/PayMaster.sol)
-contract LiquidityVaultPayMaster is IPayMaster {
+contract VaultProPayMaster is IPayMaster {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          EVENTS                            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -27,7 +27,7 @@ contract LiquidityVaultPayMaster is IPayMaster {
     struct ClaimParams {
         uint256 id;
         address referrer;
-        ILiquidityVaultReferral.Snapshot snapshot; 
+        IVaultProReferral.Snapshot snapshot; 
         uint256 mintFee;
         uint256[] fee0s;
         uint256[] fee1s;
@@ -36,7 +36,7 @@ contract LiquidityVaultPayMaster is IPayMaster {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STORAGE                           */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-    ILiquidityVaultReferral lpVault;
+    IVaultProReferral lpVault;
     address immutable _OWNER;
 
     constructor(address owner) {
@@ -53,7 +53,7 @@ contract LiquidityVaultPayMaster is IPayMaster {
         /// @dev: only set once
         if (msg.sender != _OWNER) revert NotOwner();
         if (address(lpVault) != address(0)) revert LiquidityVaultAlreadySet();
-        lpVault = ILiquidityVaultReferral(vault);
+        lpVault = IVaultProReferral(vault);
     }
 
     function OWNER() external view returns (address) { return _OWNER; }
@@ -63,7 +63,7 @@ contract LiquidityVaultPayMaster is IPayMaster {
     }
 
     function claimReferralFees(ClaimParams[] calldata params) external {
-        ILiquidityVaultReferral _lpVault = lpVault; /// @dev Cached for gas savings
+        IVaultProReferral _lpVault = lpVault; /// @dev Cached for gas savings
         address WETH = _lpVault.WETH();
 
         if (address(_lpVault) == address(0)) revert LPVaultNotSet();

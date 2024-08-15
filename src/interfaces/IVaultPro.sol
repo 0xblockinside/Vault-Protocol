@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 
 import {Permit} from "shared/structs/Permit.sol";
 
-interface ILiquidityVault {
+interface IVaultPro {
     enum CollectFeeOption {
         TOKEN_0,
         TOKEN_1,
@@ -36,8 +36,8 @@ interface ILiquidityVault {
     struct Snapshot {
         address token0;
         address token1;
-        uint256 amountIn0;
-        uint256 amountIn1;
+        uint256 balance0;
+        uint256 balance1;
         uint256 liquidity;
     }  
 
@@ -48,7 +48,7 @@ interface ILiquidityVault {
         Permit permit1;
     }
 
-    struct Fees {
+    struct CollectedFees {
         uint256 ownerFee0;
         uint256 ownerFee1;
         uint256 cut0;
@@ -58,21 +58,18 @@ interface ILiquidityVault {
     }
 
     function WETH() external pure returns (address);
-    // function ETH() external pure returns (address);
-    function mintFee(bool isReferred, uint16 feeLevelBIPS) external view returns (uint256, uint256,FeeInfo memory);
-    // function unlockTime(uint256 id) external view returns (uint256);
+    function mintFee(bool isReferred, uint16 feeLevelBIPS) external view returns (uint256, uint256, FeeInfo memory);
 
     // API
     function mint(address recipient, address referrer, MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
-    // function mint(MintParams calldata params) payable external returns (uint256 id, Snapshot memory snapshot);
     function increase(uint256 id, IncreaseParams calldata params, Snapshot calldata snapshot) payable external returns (uint256 additionalLiquidity);
-    function collect(uint256 id, Snapshot calldata snapshot) external returns (Fees memory fees);
+    function collect(uint256 id, Snapshot calldata snapshot) external returns (CollectedFees memory collected);
     function redeem(uint256 id, Snapshot calldata snapshot, bool removeLP) external;
     function extend(uint256 id, uint32 additionalTime, uint16 newFeeLevelBIPS, address oldReferrer, address referrer) payable external;
 
 }
 
-interface ILiquidityVaultReferral is ILiquidityVault {
+interface IVaultProReferral is IVaultPro {
     function verifySnapshot(uint256 id, Snapshot calldata snapshot) external view returns (uint160 snapshotHash, uint96 referralHash);
     function resetReferralHash(uint256 id, address referrer) external;
 }
