@@ -6,9 +6,9 @@ import {SafeTransferLib} from "solady/src/utils/SafeTransferLib.sol";
 import {IPayMaster} from "./interfaces/IPayMaster.sol";
 import {IVaultProReferral} from "./interfaces/IVaultPro.sol";
 
-/// @notice The Paymaster for LiquidityVault that allows for referrers to collect
+/// @notice The Paymaster for VaultPro that allows for referrers to collect
 ///         their fees via a merkle proof
-/// @author Blockinside (https://github.com/0xblockinside/LiquidityVault/blob/master/src/PayMaster.sol)
+/// @author Blockinside (https://blockinside.org/)
 contract VaultProPayMaster is IPayMaster {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          EVENTS                            */
